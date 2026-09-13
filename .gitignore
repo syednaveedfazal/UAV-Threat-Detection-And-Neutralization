@@ -1,4 +1,33 @@
-/build
-/install
-/.vscode
-/log
+# ROS 2 / Colcon build outputs
+/build/
+/install/
+/log/
+
+# Backup build artifacts created during failed rebuilds
+/build_backup_*/
+/install_backup_*/
+/log_backup_*/
+
+# Ignore nested generated outputs in subprojects as well
+**/build/
+**/install/
+**/log/
+**/build_backup_*/
+**/install_backup_*/
+**/log_backup_*/
+
+# Editor / local environment files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache / local artifacts
+__pycache__/
+*.py[cod]
+
+# OS files
+.DS_Store
+Thumbs.db
+# Simulation runtime logs
+/.sim_logs/

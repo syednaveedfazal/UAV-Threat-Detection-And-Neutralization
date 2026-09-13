@@ -1,53 +1,86 @@
+"""Launch the landing-mission world in modern Gazebo (Harmonic).
+
+This starts only the simulator; PX4 spawns the vehicle itself. Run PX4 in
+standalone mode afterwards so it attaches to the world started here:
+
+    PX4_GZ_STANDALONE=1 PX4_GZ_WORLD=landing_mission \
+    PX4_SIM_MODEL=gz_x500 PX4_SYS_AUTOSTART=4001 \
+    ~/PX4-Autopilot/build/px4_sitl_default/bin/px4 -d
+
+or just use ../../../start_uav_sim.sh, which orchestrates the whole stack.
+
+The Gazebo environment below mirrors PX4's own gz_env.sh. The server config is
+what loads the physics, sensors, IMU, magnetometer and NavSat systems; without
+it the spawned x500 produces no sensor data and PX4's EKF never converges.
+"""
+
 import os
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable, DeclareLaunchArgument
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
+from launch.conditions import UnlessCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
-    pkg_name = 'poc1_landing_world'
-    pkg_share = get_package_share_directory(pkg_name)
+    pkg_share = get_package_share_directory('poc1_landing_world')
 
-    # 1. Path to the world file
-    world_file = os.path.join(pkg_share, 'worlds', 'landing_mission.world')
-    
-    # 2. Path to your models
-    models_path = os.path.join(pkg_share, 'models')
+    px4_dir = os.environ.get('PX4_DIR', os.path.expanduser('~/PX4-Autopilot'))
+    px4_build = os.path.join(px4_dir, 'build', 'px4_sitl_default')
 
-    # 3. Path to PX4 models (for the x500 drone)
-    # Adjust this path if your PX4 is not in the home directory
-    px4_src_path = os.path.expanduser('~/PX4-Autopilot') 
-    px4_models_path = os.path.join(px4_src_path, 'Tools', 'simulation', 'gz', 'models')
+    px4_models = os.path.join(px4_dir, 'Tools', 'simulation', 'gz', 'models')
+    px4_plugins = os.path.join(
+        px4_build, 'src', 'modules', 'simulation', 'gz_plugins')
+    px4_server_config = os.path.join(
+        px4_dir, 'src', 'modules', 'simulation', 'gz_bridge', 'server.config')
 
-    # 4. Setup Resource Path (New Gazebo uses GZ_SIM_RESOURCE_PATH)
-    # We combine your custom models AND the PX4 models
-    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
-        resource_path = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + models_path + ':' + px4_models_path
-    else:
-        resource_path = models_path + ':' + px4_models_path
+    pkg_models = os.path.join(pkg_share, 'models')
+    pkg_worlds = os.path.join(pkg_share, 'worlds')
+
+    def prepend(var, *paths):
+        existing = os.environ.get(var, '')
+        joined = ':'.join(p for p in paths if p)
+        return f'{existing}:{joined}' if existing else joined
+
+    world = LaunchConfiguration('world')
+    headless = LaunchConfiguration('headless')
+
+    world_path = [os.path.join(pkg_worlds, ''), world, '.sdf']
 
     return LaunchDescription([
-        # Set the path so Gazebo finds your Brick/Tower and the Drone
-        SetEnvironmentVariable(name='GZ_SIM_RESOURCE_PATH', value=resource_path),
+        DeclareLaunchArgument(
+            'world', default_value='landing_mission',
+            description='World basename in the package worlds/ directory'),
+        DeclareLaunchArgument(
+            'headless', default_value='false',
+            description='Start the Gazebo server without the GUI'),
 
-        # Start New Gazebo (gz sim)
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(get_package_share_directory('ros_gz_sim'), 'launch', 'gz_sim.launch.py')
-            ),
-            # -r runs the simulation immediately
-            launch_arguments={'gz_args': f'-r {world_file}'}.items(),
+        SetEnvironmentVariable(
+            'GZ_SIM_RESOURCE_PATH',
+            prepend('GZ_SIM_RESOURCE_PATH', pkg_models, pkg_worlds, px4_models)),
+        SetEnvironmentVariable(
+            'GZ_SIM_SYSTEM_PLUGIN_PATH',
+            prepend('GZ_SIM_SYSTEM_PLUGIN_PATH', px4_plugins)),
+        SetEnvironmentVariable('GZ_SIM_SERVER_CONFIG_PATH', px4_server_config),
+        SetEnvironmentVariable('GZ_IP', '127.0.0.1'),
+
+        ExecuteProcess(
+            cmd=['gz', 'sim', '--verbose=1', '-r', '-s', *world_path],
+            output='screen',
+        ),
+        ExecuteProcess(
+            cmd=['gz', 'sim', '-g'],
+            output='screen',
+            condition=UnlessCondition(headless),
         ),
 
-        # Bridge: Connects Gazebo Clock to ROS 2 (Optional but good for sync)
+        # Gazebo clock -> ROS, so ROS nodes can run on simulation time.
         Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
             arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
-            output='screen'
+            output='screen',
         ),
-        
-        # NOTE: We do NOT spawn the drone here. 
-        # PX4 will spawn the drone automatically when we run the binary in the next step.
     ])

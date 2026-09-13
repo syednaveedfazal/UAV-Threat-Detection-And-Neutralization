@@ -1,0 +1,23 @@
+version: '3.8'
+services:
+  sim:
+    build: .
+    container_name: uav_sim
+    network_mode: "host"
+    environment:
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ../:/workspace:rw
+      - /home/syed/PX4-Autopilot:/px4:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    working_dir: /workspace
+    tty: true
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    # Start idle container; we'll exec into it to run the simulation steps manually.
+    command: /bin/bash -lc "tail -f /dev/null"
+
+# Notes:
+# - This compose uses host networking so GUI apps on the host (QGroundControl) can connect to PX4's UDP ports.
+# - Mounts your workspace and PX4-Autopilot into the container; ensure the host paths are correct.

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Landing-mission world for PX4 SITL on modern Gazebo (Harmonic / gz-sim8).
+
+  IMPORTANT: the <world name=...> below MUST match this file's basename,
+  because PX4 queries /world/${PX4_GZ_WORLD}/scene/info where PX4_GZ_WORLD
+  is the filename stem. See ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim.
+
+  PX4 spawns the vehicle into this world; do not add a drone model here.
+-->
+<sdf version="1.9">
+  <world name="landing_mission">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 -0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>1 1</size></plane>
+          </geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>500 500</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- BUILDING 1: Tall Tower (no tag).
+         Kept clear of the origin: PX4 spawns the vehicle at (0,0) and the
+         mission's final waypoint lands there, so a building at 0,0 would
+         swallow the drone. -->
+    <model name="tower">
+      <pose>0 8 2.5 0 0 0</pose>
+      <static>true</static>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>2 2 5</size></box></geometry>
+          <material>
+            <ambient>0.4 0.4 0.4 1</ambient>
+            <diffuse>0.5 0.5 0.5 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>2 2 5</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- BUILDING 2: Wide Base, carries landing pad 0 -->
+    <model name="base_station">
+      <pose>5 5 1 0 0 0</pose>
+      <static>true</static>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>6 6 2</size></box></geometry>
+          <material>
+            <ambient>0.45 0.22 0.15 1</ambient>
+            <diffuse>0.65 0.32 0.22 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>6 6 2</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://landing_pad_0</uri>
+      <pose>5 5 2.01 0 0 0</pose>
+    </include>
+
+    <!-- BUILDING 3: Outpost, carries landing pad 1 -->
+    <model name="outpost">
+      <pose>-4 2 1.5 0 0 0</pose>
+      <static>true</static>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>4 3 3</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.95 0.95 0.95 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>4 3 3</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://landing_pad_1</uri>
+      <pose>-4 2 3.01 0 0 0</pose>
+    </include>
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+  </world>
+</sdf>

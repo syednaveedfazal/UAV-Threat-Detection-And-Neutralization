@@ -1,5 +1,7 @@
 <?xml version="1.0" ?>
-<sdf version="1.5">
+<!-- AprilTag landing pad 0. Modern Gazebo (Harmonic) PBR material;
+     the Gazebo Classic <material><script> form is not supported by gz-sim. -->
+<sdf version="1.9">
   <model name="landing_pad_0">
     <static>true</static>
     <link name="link">
@@ -9,11 +11,16 @@
       <visual name="visual">
         <geometry><box><size>0.5 0.5 0.01</size></box></geometry>
         <material>
-          <script>
-            <uri>model://landing_pad_0/materials/scripts</uri>
-            <uri>model://landing_pad_0/materials/textures</uri>
-            <name>AprilTag/Tag0</name>
-          </script>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0 0 0 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>materials/textures/tag0.png</albedo_map>
+              <metalness>0.0</metalness>
+              <roughness>1.0</roughness>
+            </metal>
+          </pbr>
         </material>
       </visual>
     </link>
