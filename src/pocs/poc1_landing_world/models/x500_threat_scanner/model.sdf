@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PX4 x500 with a 16-beam 3D LiDAR and a forward RGB camera.
+
+  Sensor rationale
+  ----------------
+  LiDAR gives metric geometry that does not care about lighting, haze or
+  texture, so it is what actually produces a precision 3D point cloud for
+  mapping. A camera gives appearance, which is what lets you say *what* a
+  detected object is. Neither alone is enough for "find the threat on the go",
+  so this model carries both and they are meant to be fused: cluster the point
+  cloud to get position/size, use the image to classify.
+
+  The LiDAR is modelled on a Velodyne VLP-16 / Ouster OS1-16 class unit:
+  360 degrees horizontal, 16 beams vertical, 100 m range. The vertical band is
+  biased downward (-25 to +15 deg) because this vehicle maps terrain and
+  ground targets below it rather than scanning the sky.
+
+  Cost note: rays per second = horizontal samples x vertical samples x rate.
+  Here that is 512 x 16 x 10 = 81,920 rays/s. gpu_lidar renders on the GPU, so
+  this is comfortable on a discrete GPU and sluggish on an Intel iGPU. Raise
+  <samples> for denser clouds once you are on the RTX.
+
+  Mass: the real sensors weigh ~0.9 kg combined, which would need the x500
+  hover thrust retuned. They are modelled light (0.12 kg total) so the stock
+  4001 airframe tuning stays valid. Raise them only if you also retune
+  MPC_THR_HOVER.
+-->
+<sdf version='1.9'>
+  <model name='x500_threat_scanner'>
+
+    <!-- Stock PX4 x500 airframe: links, rotors, IMU, GPS, magnetometer. -->
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+
+    <!-- ------------------------------------------------ 3D LiDAR -------- -->
+    <link name="lidar_link">
+      <pose relative_to="base_link">0 0 0.13 0 0 0</pose>
+      <inertial>
+        <mass>0.08</mass>
+        <inertia>
+          <ixx>0.00002</ixx>
+          <iyy>0.00002</iyy>
+          <izz>0.00002</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry>
+          <cylinder>
+            <radius>0.04</radius>
+            <length>0.06</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.15 0.15 0.15 1</ambient>
+          <diffuse>0.25 0.25 0.25 1</diffuse>
+          <specular>0.4 0.4 0.4 1</specular>
+        </material>
+      </visual>
+
+      <sensor name="lidar_3d" type="gpu_lidar">
+        <gz_frame_id>lidar_link</gz_frame_id>
+        <topic>lidar_3d</topic>
+        <update_rate>10</update_rate>
+        <always_on>1</always_on>
+        <visualize>true</visualize>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>512</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.141592653</min_angle>
+              <max_angle>3.141592653</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>16</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.436332</min_angle>  <!-- -25 deg -->
+              <max_angle>0.261799</max_angle>   <!-- +15 deg -->
+            </vertical>
+          </scan>
+          <range>
+            <min>0.5</min>
+            <max>100.0</max>
+            <resolution>0.01</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.02</stddev>
+          </noise>
+        </ray>
+      </sensor>
+    </link>
+
+    <joint name="lidar_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>lidar_link</child>
+    </joint>
+
+    <!-- --------------------------------------------- forward camera ----- -->
+    <link name="front_camera_link">
+      <pose relative_to="base_link">0.15 0 0.03 0 0 0</pose>
+      <inertial>
+        <mass>0.04</mass>
+        <inertia>
+          <ixx>0.00001</ixx>
+          <iyy>0.00001</iyy>
+          <izz>0.00001</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry>
+          <box><size>0.03 0.05 0.03</size></box>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.2 1</ambient>
+          <diffuse>0.2 0.2 0.35 1</diffuse>
+        </material>
+      </visual>
+
+      <sensor name="front_cam" type="camera">
+        <gz_frame_id>front_camera_link</gz_frame_id>
+        <topic>front_cam</topic>
+        <update_rate>15</update_rate>
+        <always_on>1</always_on>
+        <camera>
+          <horizontal_fov>1.204</horizontal_fov> <!-- ~69 deg -->
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.005</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+
+    <joint name="front_camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>front_camera_link</child>
+    </joint>
+
+  </model>
+</sdf>

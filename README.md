@@ -95,6 +95,87 @@ ros2 run poc1_landing_world mission_control.py
 `ros2 launch poc1_landing_world world.launch.py` performs step 1 with the same
 environment if you prefer the ROS entry point.
 
+## Real-world satellite terrain
+
+Terrain comes from [gazebo_terrain_generator](https://github.com/saiaravind19/gazebo_terrain_generator),
+which builds a Gazebo world from Mapbox elevation + satellite imagery and
+optional OSM buildings. It targets modern Gazebo, so it drops straight into
+this stack.
+
+```bash
+cd ~/UAV/gazebo_terrain_generator
+uv sync
+uv run scripts/server.py        # then open http://localhost:8080
+```
+
+Paste a Mapbox public token (`pk.eyJ1...`) under **Settings -> Mapbox API Key**,
+draw a polygon, set the spawn marker, download the `.zip` and unzip it.
+
+### Generated worlds need one fix before PX4 will fly in them
+
+A generated world declares its own Gazebo systems, but only the ones needed to
+render: physics, sensors, imu, navsat, scene-broadcaster, user-commands.
+Because the world declares plugins inline, Gazebo uses *that* list and PX4's
+own `server.config` is not applied - so the magnetometer and barometer systems
+are simply absent and PX4 refuses to arm:
+
+```
+Preflight Fail: barometer 0 missing
+Preflight Fail: Found 0 compass (required: 1)
+Preflight Fail: heading estimate invalid
+```
+
+Patch the world once:
+
+```bash
+scripts/prepare_terrain_world.py /path/to/<name>/<name>.world
+```
+
+It injects the missing systems (idempotent, keeps a `.orig` backup) and prints
+the terrain's real-world origin. Then fly in it:
+
+```bash
+./start_uav_sim.sh --world /path/to/<name>/<name>.world
+```
+
+`--world` accepts a bare name in `worlds/`, or any path to a `.sdf`/`.world`.
+The launcher reads the `<world name>` from inside the file (it need not match
+the filename) and picks up the terrain's `<spherical_coordinates>` to set
+`PX4_HOME_LAT/LON/ALT`, so GPS, QGC's map and the terrain agree.
+
+Two sample worlds ship with the generator and need **no Mapbox key**, which
+makes them the quickest way to check the pipeline:
+`sample_worlds/applepark` (Apple Park, with 3D buildings) and
+`sample_worlds/Joshimath` (Himalayan terrain).
+
+## LiDAR and the 3D point cloud
+
+`models/x500_threat_scanner/` is the x500 plus:
+
+- **16-beam 3D LiDAR** (`gpu_lidar`), 360 deg x 512 samples, 100 m range,
+  10 Hz, vertical band biased downward (-25 to +15 deg) for mapping the ground
+- **forward RGB camera**, 640x480 @ 15 Hz
+
+LiDAR gives metric geometry regardless of lighting; the camera gives
+appearance. Fuse them: cluster the cloud for position/size, classify with the
+image. Neither alone answers "what is that and where".
+
+```bash
+./start_uav_sim.sh --model gz_x500_threat_scanner --sensors --mission
+```
+
+ROS 2 topics (via `sensors.launch.py`):
+
+| Topic | Type |
+| --- | --- |
+| `/lidar_3d/points` | `sensor_msgs/PointCloud2` |
+| `/lidar_3d` | `sensor_msgs/LaserScan` |
+| `/front_cam/image` | `sensor_msgs/Image` |
+| `/front_cam/camera_info` | `sensor_msgs/CameraInfo` |
+
+Cloud density is `horizontal x vertical x rate` = 512 x 16 x 10 = 82k rays/s.
+Raise `<samples>` in the model for a denser cloud once you are on the dGPU.
+
 ## Verifying it actually works
 
 A successful build proves nothing; check the running system:
@@ -127,6 +208,14 @@ start if this check fails.
 **Two Gazebo windows / drone in one and buildings in the other.** Something is
 running both Gazebo Classic and modern Gazebo. This project is modern Gazebo
 (Harmonic) only.
+
+**QGroundControl exits immediately / `GLIBC_2.38' not found`.** Recent QGC
+AppImages are built against glibc 2.38 and cannot run on Ubuntu 22.04, which
+ships glibc 2.35. If you have two AppImages in `~/Downloads`, the newer one is
+probably the broken one — delete it, or keep the older working build. The
+launcher tries candidates newest-first, reports the crash, and falls back to
+the next one; it also skips starting QGC entirely if an instance is already
+running. Check your glibc with `ldd --version`.
 
 **PX4 never accepts OFFBOARD.** PX4 requires a stream of
 `OffboardControlMode` *and* `TrajectorySetpoint` messages *before* the mode
