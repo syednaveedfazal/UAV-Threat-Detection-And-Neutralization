@@ -2,11 +2,14 @@
 /build/
 /install/
 /log/
-
+*.meta
 # Backup build artifacts created during failed rebuilds
 /build_backup_*/
 /install_backup_*/
 /log_backup_*/
+
+*.asset
+*.asmdef
 
 # Ignore nested generated outputs in subprojects as well
 **/build/
@@ -31,3 +34,17 @@ __pycache__/
 Thumbs.db
 # Simulation runtime logs
 /.sim_logs/
+
+# Unity: commit Assets/, Packages/, ProjectSettings/ only
+/unity/GuardianSim/[Ll]ibrary/
+/unity/GuardianSim/[Tt]emp/
+/unity/GuardianSim/[Oo]bj/
+/unity/GuardianSim/[Ll]ogs/
+/unity/GuardianSim/[Bb]uild/
+/unity/GuardianSim/[Bb]uilds/
+/unity/GuardianSim/[Uu]ser[Ss]ettings/
+/unity/GuardianSim/MemoryCaptures/
+/unity/GuardianSim/*.csproj
+/unity/GuardianSim/*.sln
+/unity/GuardianSim/.vs/
+/unity/GuardianSim/.idea/

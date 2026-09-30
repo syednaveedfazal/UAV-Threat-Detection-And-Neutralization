@@ -164,8 +164,9 @@ makes them the quickest way to check the pipeline:
 A 600 x 600 m world built from official open geodata of North Rhine-Westphalia
 ([OpenGeodata.NRW](https://www.opengeodata.nrw.de/produkte/geobasis/), licence
 dl-de/zero-2.0): 1 m terrain (DGM1), 10 cm aerial photo (2025), LoD2 buildings
-with real roof shapes, and the airborne laser scan. It contains 616 buildings and
-927 trees detected at their real positions and heights, plus a secure compound
+with real roof shapes, and the airborne laser scan. It contains 332 buildings
+(331 from LoD2 plus one traced from the 2025 photo, together 615 building parts)
+and 927 trees detected at their real positions and heights, plus a secure compound
 (fence, gate, guard booth, floodlights, one breach) around the new institute
 building, and two walking people: an intruder entering through the breach and
 a pedestrian on the public street.
@@ -192,6 +193,28 @@ The build also writes `prior_map.laz`: the real laser scan plus the designed
 fence, in world coordinates. That is the "known world" for change detection.
 The walking people are not in it.
 
+### Scene package for Unity and Isaac Sim
+
+`--export-scene` additionally writes `scene/`, an engine-neutral package that
+other renderers build the same site from:
+
+| File | Contents |
+|---|---|
+| `terrain.glb` | 16 terrain tiles (150 m), 1 m grid, each with its own 10 cm aerial-photo texture |
+| `buildings.glb` | roofs (real photo texture) + walls grouped by facade category (residential, commercial, public, structure) |
+| `ndvi.png` | vegetation index from the photo's infrared band: where grass actually is |
+| `scene_manifest.json` | geo origin, sun time, camera spec, and every instance an engine renders with its own asset: trees, fence parts, floodlights, people's timed paths |
+
+Coordinates in the manifest match the Gazebo world (ENU, origin at the launch
+pad); the glTF files use glTF's axes (X = East, Y = Up, Z = -North). The
+manifest is validated against `scripts/scene_manifest.schema.json`, and
+`scripts/tests/` checks orientation, texture mapping and that people walk the
+same paths in Gazebo and in the manifest:
+
+```bash
+~/.venvs/geo/bin/python -m pytest scripts/tests -q
+```
+
 **The data has three dates, and that matters.** LoD2 follows the 2023
 cadastre, the laser scan is from 2019-2024, and the photo is from 2025. The
 new institute building is missing from LoD2 and was a construction site when
@@ -202,6 +225,43 @@ the project is about, occurring in real data.
 Limits: building facades are plain (LoD2 has no facade textures), trees are
 simplified shapes at their real positions and heights, and Gazebo is not a
 photoreal renderer. LiDAR geometry is realistic; camera images are not.
+
+## Unity (HDRP): the same site as a photoreal camera
+
+Gazebo keeps doing flight, physics and LiDAR; Unity renders the drone's camera
+from the same real site (Phase 3 connects them over ROS 2). Unity 6.6 + HDRP 17.7.
+
+- `unity/com.guardian.sim/` - Unity package: builds the site from the scene
+  package, stand-in trees/people (realistic assets come later), sun from the
+  real date and place, all coordinate conversion in `Runtime/Frames.cs`.
+- `unity/GuardianSim/` - the HDRP project; it references the package by
+  relative path in `Packages/manifest.json`.
+
+In the editor: **Guardian → Load Site (compound)** or **(full 600 m)**. The site
+is rebuilt from the data every time and never saved into the scene; press Play
+to see the intruder (red) and pedestrian (blue) walk. Tests: **Window → General
+→ Test Runner → EditMode**.
+
+From the command line (editor closed):
+
+```bash
+U=~/Unity/Hub/Editor/6000.6.3f1/Editor/Unity
+GPU="__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only"
+env $GPU $U -batchmode -projectPath unity/GuardianSim -runTests -testPlatform EditMode -testResults /tmp/results.xml
+env $GPU $U -batchmode -projectPath unity/GuardianSim -executeMethod Guardian.Sim.Editor.GuardianMenu.BatchCapture
+~/.venvs/geo/bin/python scripts/check_unity_alignment.py ~/UAV/data/bonn_poppelsdorf/world/scene/unity_topdown_compound.png
+env $GPU $U -batchmode -projectPath unity/GuardianSim -executeMethod Guardian.Sim.Editor.GuardianMenu.BatchBenchmark
+```
+
+Measured on the RTX 4050 laptop (Phase 2):
+
+| Check | Result |
+|---|---|
+| EditMode tests | 9/9 pass |
+| Alignment with the real aerial photo (HDRP) | 5 cm offset; correct orientation 0.87 vs <= 0.03 for mirrored/rotated |
+| Drone camera 960x540, render + GPU readback, **with Gazebo + PX4 running** | compound 6.6 ms (p95 8.1), full 600 m site 14.3 ms (p95 20.0) per frame; the 15 Hz camera needs 66.7 ms |
+| Peak GPU memory / system RAM | 1.65 GB of 6 GB / 9.9 GB of 15 GB |
+| Gazebo real-time factor while Unity rendered | 0.998 |
 
 ## LiDAR and the 3D point cloud
 

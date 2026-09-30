@@ -25,15 +25,21 @@ Coordinates: the site file uses metres relative to the bbox centre
 (x = East, y = North). The world origin is placed at `launch_pad`, where PX4
 spawns the vehicle, and heights are relative to the ground there.
 
+With --export-scene it also writes scene/ - the engine-neutral package
+(glTF terrain tiles + buildings, NDVI vegetation mask, scene_manifest.json)
+that Unity loads now and Isaac Sim will load later. See scene_package.py.
+
 Usage:
     ~/.venvs/geo/bin/python scripts/build_real_site.py sites/bonn_poppelsdorf.yaml
     ~/.venvs/geo/bin/python scripts/build_real_site.py sites/bonn_poppelsdorf.yaml --preview-only
+    ~/.venvs/geo/bin/python scripts/build_real_site.py sites/bonn_poppelsdorf.yaml --export-scene
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import json
 import math
 import os
 import re
@@ -53,6 +59,8 @@ from scipy import ndimage
 from shapely import contains_xy
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
+
+from scene_package import facade_category
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -170,24 +178,31 @@ class Terrain:
 # ---------------------------------------------------------------- orthophoto --
 
 def build_orthophoto(raw: Path, e0: float, n0: float, size: float,
-                     m_per_px: float) -> Image.Image:
-    """Mosaic and crop the aerial photo to the bbox at the requested resolution."""
+                     m_per_px: float, with_nir: bool = False):
+    """Mosaic and crop the aerial photo to the bbox at the requested resolution.
+
+    Returns the RGB image, or (RGB, near-infrared) when with_nir is set.
+    """
     reduce = max(0, int(round(math.log2(m_per_px / 0.1))))
     px = 0.1 * 2 ** reduce
     out_n = int(round(size / px))
     canvas = Image.new("RGB", (out_n, out_n))
+    nir_canvas = Image.new("L", (out_n, out_n)) if with_nir else None
     for te, tn in tiles_for_bbox(e0, n0, size):
         path = find_tile(raw, f"dop10rgbi_32_{te}_{tn}_1_nw_*.jp2")
         im = Image.open(path)
         im.reduce = reduce          # decode at lower resolution (JPEG2000 feature)
         im.load()
-        r, g, b = im.split()[:3]    # band 4 is near-infrared, not alpha
-        im = Image.merge("RGB", (r, g, b))
+        bands = im.split()          # band 4 is near-infrared, not alpha
+        rgb = Image.merge("RGB", bands[:3])
         # tile's upper-left, in bbox-canvas pixels (canvas row 0 = north edge)
         ox = int(round((te * 1000 - e0) / px))
         oy = int(round(((n0 + size) - (tn + 1) * 1000) / px))
-        canvas.paste(im, (ox, oy))
-    return canvas
+        canvas.paste(rgb, (ox, oy))
+        if with_nir:
+            nir_canvas.paste(bands[3], (ox, oy))
+        del im, bands, rgb
+    return (canvas, nir_canvas) if with_nir else canvas
 
 
 # ----------------------------------------------------------------- OBJ output --
@@ -316,10 +331,12 @@ def _poslist(elem) -> np.ndarray:
 def load_buildings(raw: Path, frame: Frame):
     """Parse LoD2 buildings inside the bbox.
 
-    Returns (roof polygons, wall polygons, 2D footprints), each polygon a list
-    of rings in UTM/DHHN2016.
+    Returns (roof polygons, wall polygons, 2D footprints, per-building records),
+    each polygon a list of rings in UTM/DHHN2016. The records keep each
+    building's own surfaces plus its ALKIS attributes (function, roof type,
+    measured height) for the engine-neutral scene package.
     """
-    roofs, walls, footprints = [], [], []
+    roofs, walls, footprints, records = [], [], [], []
     e_lo, n_lo = frame.bbox_e0, frame.bbox_n0
     e_hi, n_hi = e_lo + frame.size, n_lo + frame.size
     seen = set()
@@ -330,6 +347,9 @@ def load_buildings(raw: Path, frame: Frame):
             if bld.getparent() is not None and bld.getparent().tag.endswith("BuildingPart"):
                 continue
             gid = bld.get(f"{{{NS['gml']}}}id")
+            function = bld.findtext(".//bldg:function", namespaces=NS)
+            roof_type = bld.findtext(".//bldg:roofType", namespaces=NS)
+            height = bld.findtext(".//bldg:measuredHeight", namespaces=NS)
             surfaces = {}
             for kind in ("RoofSurface", "WallSurface", "GroundSurface"):
                 polys = []
@@ -355,7 +375,13 @@ def load_buildings(raw: Path, frame: Frame):
                 fp = Polygon(rings[0][:, :2])
                 if fp.is_valid and fp.area > 1:
                     footprints.append(fp)
-    return roofs, walls, footprints
+            records.append({
+                "id": gid, "function": function, "roof_type": roof_type,
+                "height": float(height) if height else None,
+                "category": facade_category(function), "source": "LoD2",
+                "centroid": frame.en_to_world(cx, cy),
+                "roofs": surfaces["RoofSurface"], "walls": surfaces["WallSurface"]})
+    return roofs, walls, footprints, records
 
 
 def building_mesh(roofs, walls, frame: Frame) -> tuple[ObjWriter, int]:
@@ -406,9 +432,10 @@ def extra_buildings(cfg_list: list, frame: Frame, terrain: Terrain):
     since is missing. These are traced from the (newer) orthophoto in the site
     file and extruded to a flat-roofed prism - LoD1, but correct in footprint
     and height, which is what the LiDAR sees.
-    Returns roof polygons, wall polygons, footprints (UTM/DHHN2016).
+    Returns roof polygons, wall polygons, footprints (UTM/DHHN2016) and
+    per-building records (same shape as load_buildings').
     """
-    roofs, walls, footprints = [], [], []
+    roofs, walls, footprints, records = [], [], [], []
     for b in cfg_list or []:
         ring = np.array([frame.site_to_en(*p) for p in b["footprint"]], float)
         fp = Polygon(ring)
@@ -417,12 +444,22 @@ def extra_buildings(cfg_list: list, frame: Frame, terrain: Terrain):
             fp = Polygon(ring)
         base = float(terrain.height(ring[:, 0], ring[:, 1]).min()) - 0.5
         top = base + 0.5 + float(b["height"])
-        roofs.append([np.column_stack([ring, np.full(len(ring), top)])])
+        b_roofs = [[np.column_stack([ring, np.full(len(ring), top)])]]
+        b_walls = []
         for i in range(len(ring)):
             a, c = ring[i], ring[(i + 1) % len(ring)]
-            walls.append([np.array([[*a, base], [*c, base], [*c, top], [*a, top]])])
+            b_walls.append([np.array([[*a, base], [*c, base], [*c, top], [*a, top]])])
+        roofs += b_roofs
+        walls += b_walls
         footprints.append(fp)
-    return roofs, walls, footprints
+        records.append({
+            "id": b.get("name", f"extra_{len(records)}"), "function": None,
+            "roof_type": "1000", "height": float(b["height"]),
+            "category": b.get("category", "unknown"),
+            "source": "traced from orthophoto (newer than cadastre)",
+            "centroid": frame.en_to_world(fp.centroid.x, fp.centroid.y),
+            "roofs": b_roofs, "walls": b_walls})
+    return roofs, walls, footprints, records
 
 
 # --------------------------------------------------------------------- trees --
@@ -571,18 +608,28 @@ def _box(cx, cy, cz, lx, ly, lz, yaw):
 
 
 class Parts:
-    """Collects boxes per material."""
+    """Collects boxes per material, and remembers each one as a typed instance.
+
+    Gazebo renders the boxes; other engines get the instance list (type, centre,
+    size, yaw) and swap in their own fence/gate/floodlight assets.
+    """
 
     def __init__(self):
         self.v: dict[str, list] = {}
         self.f: dict[str, list] = {}
         self.n: dict[str, int] = {}
+        self.instances: list[dict] = []
 
-    def box(self, mat, *args):
-        v, f = _box(*args)
+    def box(self, mat, cx, cy, cz, lx, ly, lz, yaw):
+        v, f = _box(cx, cy, cz, lx, ly, lz, yaw)
         self.v.setdefault(mat, []).append(v)
         self.f.setdefault(mat, []).append(f + self.n.get(mat, 0))
         self.n[mat] = self.n.get(mat, 0) + len(v)
+        self.instances.append({
+            "type": mat,
+            "centre": [round(float(cx), 3), round(float(cy), 3), round(float(cz), 3)],
+            "size": [round(float(lx), 3), round(float(ly), 3), round(float(lz), 3)],
+            "yaw": round(float(yaw), 5)})
 
     def to_obj(self) -> ObjWriter:
         obj = ObjWriter()
@@ -680,7 +727,7 @@ def build_perimeter(cfg: dict, frame: Frame, terrain: Terrain, footprints):
     print(f"  perimeter: {n_panels} fence panels, {n_skipped} skipped where a "
           f"building wall forms the boundary, {len([g for g in gaps if g[2]=='gate'])} gate(s), "
           f"{len([g for g in gaps if g[2]=='breach'])} breach(es), {n_lights} floodlight poles")
-    return parts.to_obj(), fence_lines
+    return parts.to_obj(), fence_lines, parts.instances
 
 
 # -------------------------------------------------------------------- actors --
@@ -688,27 +735,44 @@ def build_perimeter(cfg: dict, frame: Frame, terrain: Terrain, footprints):
 WALK_DAE = "https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae"
 
 
-def actor_sdf(name: str, path_site: list, frame: Frame, terrain: Terrain,
-              speed: float = 1.2) -> str:
-    """An animated walking person following a looped path."""
+def actor_waypoints(path_site: list, frame: Frame, terrain: Terrain,
+                    speed: float = 1.2) -> list[dict]:
+    """Timed waypoints of a looped walk: {t, x, y, z_ground, yaw} in world ENU.
+
+    Computed once and used by both Gazebo (actor script) and the scene
+    manifest, so every engine places a walking person at the same spot at the
+    same simulation time. Each leg is written as a start and an end waypoint
+    with the leg's heading, so the person turns on the spot at corners.
+    """
     pts = [frame.site_to_en(*p) for p in path_site]
     pts.append(pts[0])
     t, wps = 0.0, []
     for i in range(len(pts) - 1):
         (e0, n0), (e1, n1) = pts[i], pts[i + 1]
         yaw = math.atan2(n1 - n0, e1 - e0)
-        for (e, n), tt in (((e0, n0), t), ((e1, n1), t + math.hypot(e1 - e0, n1 - n0) / speed)):
+        leg = math.hypot(e1 - e0, n1 - n0) / speed
+        for (e, n), tt in (((e0, n0), t), ((e1, n1), t + leg)):
             x, y = frame.en_to_world(e, n)
-            z = float(terrain.height(e, n)) - frame.origin_h + 1.0  # mesh root is the hip
-            wps.append(f"<waypoint><time>{tt:.2f}</time><pose>{x:.2f} {y:.2f} {z:.2f} 0 0 {yaw:.3f}</pose></waypoint>")
-        t += math.hypot(e1 - e0, n1 - n0) / speed + 0.001
+            wps.append({"t": round(tt, 3), "x": round(float(x), 3), "y": round(float(y), 3),
+                        "z_ground": round(float(terrain.height(e, n)) - frame.origin_h, 3),
+                        "yaw": round(yaw, 5)})
+        t += leg + 0.001
+    return wps
+
+
+def actor_sdf(name: str, wps: list[dict]) -> str:
+    """An animated walking person following a looped path (Gazebo actor)."""
+    xml = "".join(
+        f"<waypoint><time>{w['t']:.3f}</time><pose>{w['x']:.3f} {w['y']:.3f} "
+        f"{w['z_ground'] + 1.0:.3f} 0 0 {w['yaw']:.5f}</pose></waypoint>"  # +1 m: mesh root is the hip
+        for w in wps)
     return f"""
     <actor name="{name}">
       <skin><filename>{WALK_DAE}</filename><scale>1.0</scale></skin>
       <animation name="walk"><filename>{WALK_DAE}</filename><interpolate_x>true</interpolate_x></animation>
       <script><loop>true</loop><auto_start>true</auto_start>
         <trajectory id="0" type="walk">
-          {''.join(wps)}
+          {xml}
         </trajectory>
       </script>
     </actor>"""
@@ -831,11 +895,77 @@ def write_preview(path: Path, ortho: Image.Image, frame: Frame, footprints, tree
     im.save(path)
 
 
+def export_scene(out: Path, cfg: dict, raw: Path, frame: Frame, terrain: Terrain,
+                 lat: float, lon: float, roof_ortho: Image.Image, bld_records: list,
+                 trees: list, perim_parts: list, actor_paths: list) -> Path:
+    """Write the engine-neutral scene package (see scene_package.py)."""
+    import scene_package as sp
+
+    sc = cfg.get("scene", {})
+    tex_dir = out / "scene" / "textures"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+
+    print("[+] scene package: 10 cm orthophoto tiles")
+    ortho_full = build_orthophoto(raw, frame.bbox_e0, frame.bbox_n0, frame.size,
+                                  sc.get("texture_m_per_px", 0.1))
+    terrain_meshes, tile_records = sp.terrain_tiles(
+        terrain, frame, ortho_full, sc.get("tile_m", 150.0),
+        sc.get("terrain_step", 1.0), tex_dir)
+    del ortho_full
+
+    print("[+] scene package: vegetation (NDVI) from the photo's infrared band")
+    ndvi_px = sc.get("ndvi_m_per_px", 0.4)
+    rgb, nir = build_orthophoto(raw, frame.bbox_e0, frame.bbox_n0, frame.size, ndvi_px,
+                                with_nir=True)
+    ndvi = sp.ndvi_image(rgb.split()[0], nir)
+    veg = (np.asarray(ndvi) > (0.3 + 1) * 127.5).mean()
+
+    print("[+] scene package: buildings, instances, manifest")
+    roof_tex = sp._jpeg(roof_ortho, tex_dir / "roofs.jpg")
+    building_parts = sp.building_meshes(bld_records, frame, triangulate_polygon, roof_tex)
+    trees_world = []
+    for e, n, h, r in trees:
+        x, y = frame.en_to_world(e, n)
+        trees_world.append([x, y, float(terrain.height(e, n)) - frame.origin_h, h, r])
+    counts = {}
+    for p in perim_parts:
+        counts[p["type"]] = counts.get(p["type"], 0) + 1
+    stats = {"buildings": len(bld_records), "trees": len(trees_world),
+             "terrain_tiles": len(tile_records),
+             "perimeter_parts": counts,
+             "vegetation_fraction": round(float(veg), 3),
+             "triangles": {name: int(len(m.faces))
+                           for name, m in terrain_meshes[:1] + building_parts}}
+    path = sp.write_package(out, cfg=cfg, frame=frame, lat=lat, lon=lon,
+                            terrain_meshes=terrain_meshes, tile_records=tile_records,
+                            building_parts=building_parts, building_records=bld_records,
+                            trees_world=trees_world, perimeter_parts=perim_parts,
+                            actors=actor_paths, ndvi=ndvi, ndvi_m_per_px=ndvi_px,
+                            stats=stats)
+    try:
+        import jsonschema
+        schema = json.loads((Path(__file__).parent / "scene_manifest.schema.json").read_text())
+        jsonschema.validate(json.loads(path.read_text()), schema)
+        print("      manifest valid against scripts/scene_manifest.schema.json")
+    except ImportError:
+        print("      (jsonschema not installed - manifest not validated)")
+    sizes = {p.name: p.stat().st_size / 1e6 for p in (out / "scene").glob("*.*")}
+    print(f"      {len(tile_records)} terrain tiles, {len(bld_records)} buildings, "
+          f"{len(trees_world)} trees, {len(perim_parts)} perimeter parts, "
+          f"{len(actor_paths)} actors, vegetation {veg:.0%} of area")
+    print("      " + ", ".join(f"{k} {v:.1f} MB" for k, v in sorted(sizes.items())))
+    print(f"      -> {path}")
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("site", type=Path, help="site YAML")
     ap.add_argument("--preview-only", action="store_true",
                     help="only render preview.png (fast iteration on the layout)")
+    ap.add_argument("--export-scene", action="store_true",
+                    help="also write the engine-neutral scene package (glTF + manifest) "
+                         "used by Unity now and Isaac Sim later")
     args = ap.parse_args()
     cfg = yaml.safe_load(args.site.read_text())
     raw = Path(os.path.expanduser(cfg["raw_dir"]))
@@ -859,10 +989,10 @@ def main():
     print(f"      {ortho.width}x{ortho.height} px")
 
     print("[3/7] buildings (LoD2)")
-    roofs, walls, footprints = load_buildings(raw, frame)
+    roofs, walls, footprints, bld_records = load_buildings(raw, frame)
     print(f"      {len(footprints)} footprints, {len(roofs)} roof / {len(walls)} wall polygons")
-    xr, xw, xf = extra_buildings(cfg.get("extra_buildings"), frame, terrain)
-    roofs += xr; walls += xw; footprints += xf
+    xr, xw, xf, x_records = extra_buildings(cfg.get("extra_buildings"), frame, terrain)
+    roofs += xr; walls += xw; footprints += xf; bld_records += x_records
     if xf:
         print(f"      + {len(xf)} building(s) newer than the cadastre, traced from the photo")
 
@@ -872,7 +1002,8 @@ def main():
     print(f"      {len(trees)} trees, {len(cloud[0]):,} laser points in bbox")
 
     print("[5/7] security perimeter")
-    perim_obj, fence_lines = build_perimeter(cfg["perimeter"], frame, terrain, footprints)
+    perim_obj, fence_lines, perim_parts = build_perimeter(cfg["perimeter"], frame, terrain,
+                                                          footprints)
 
     write_preview(out / "preview.png", ortho, frame, footprints, trees, fence_lines, cfg)
     print(f"      preview -> {out / 'preview.png'}")
@@ -906,8 +1037,10 @@ def main():
           f"trees {tobj.triangle_count():,}, perimeter {perim_obj.triangle_count():,}")
 
     print("[7/7] world + prior map")
-    actors = "".join(actor_sdf(a["name"], a["path"], frame, terrain, a.get("speed", 1.2))
-                     for a in cfg.get("actors", []))
+    actor_paths = [{"name": a["name"], "speed": a.get("speed", 1.2), "loop": True,
+                    "waypoints": actor_waypoints(a["path"], frame, terrain, a.get("speed", 1.2))}
+                   for a in cfg.get("actors", [])]
+    actors = "".join(actor_sdf(a["name"], a["waypoints"]) for a in actor_paths)
     (out / f"{cfg['name']}.sdf").write_text(world_sdf(cfg["name"], frame, lat, lon, actors))
 
     # Prior map = real laser scan + the perimeter the operator built (sampled),
@@ -934,6 +1067,10 @@ def main():
     las.write(out / "prior_map.laz")
     print(f"      world -> {out / (cfg['name'] + '.sdf')}")
     print(f"      prior -> {out / 'prior_map.laz'} ({len(las.x):,} points)")
+
+    if args.export_scene:
+        export_scene(out, cfg, raw, frame, terrain, lat, lon, ortho, bld_records, trees,
+                     perim_parts, actor_paths)
     print("\nRun it:\n"
           f"  ./start_uav_sim.sh --world {out / (cfg['name'] + '.sdf')} "
           "--model gz_x500_threat_scanner --sensors")

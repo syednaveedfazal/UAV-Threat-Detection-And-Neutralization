@@ -1,0 +1,12 @@
+{
+  "name": "com.guardian.sim",
+  "version": "0.1.0",
+  "displayName": "Guardian Sim",
+  "description": "Builds the real-site scene (scene_manifest.json + glTF from scripts/build_real_site.py --export-scene) and, from Phase 3, renders the drone gimbal camera for ROS 2.",
+  "unity": "6000.0",
+  "dependencies": {
+    "com.unity.cloud.gltfast": "6.20.0",
+    "com.unity.nuget.newtonsoft-json": "3.2.2"
+  },
+  "author": { "name": "Syed" }
+}
