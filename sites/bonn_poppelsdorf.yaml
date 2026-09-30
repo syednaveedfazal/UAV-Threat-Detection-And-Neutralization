@@ -1,0 +1,57 @@
+# Real-site world: University of Bonn, Campus Poppelsdorf.
+# Source: NRW OpenGeodata (Land NRW, dl-de/zero-2.0) - LoD2 buildings, DGM1
+# terrain, DOP10 aerial photo (2025), airborne laser scan.
+#
+# All coordinates below are metres relative to the bbox centre
+# (x = East, y = North) - the same grid as preview.png.
+# Build:  ~/.venvs/geo/bin/python scripts/build_real_site.py sites/bonn_poppelsdorf.yaml
+
+name: bonn_poppelsdorf
+raw_dir: ~/UAV/data/bonn_poppelsdorf/raw
+out_dir: ~/UAV/data/bonn_poppelsdorf/world
+
+bbox: {e0: 364820, n0: 5620827, size: 600}   # EPSG:25832, 600 x 600 m
+texture_m_per_px: 0.2                        # orthophoto 20 cm/px -> 3000 px
+terrain_mesh_step: 2.0
+terrain_collision_step: 6.0
+
+launch_pad: [-159.9, -37.7]   # paved area between building and gate; world (0,0)
+
+trees:
+  min_height: 4.0
+  min_separation: 4.0
+  building_buffer: 1.5
+
+# Buildings on site that the official LoD2 data does not contain yet. LoD2
+# follows the cadastre (2023); this institute building was still a
+# construction site when the laser scan was flown, and is finished in the
+# 2025 photo. Traced from that photo; height estimated from its shadow.
+extra_buildings:
+  - name: new_institute_building
+    footprint: [[-191.3, -23.8], [-151.3, -57.5], [-178.8, -83.8], [-215.0, -50.0]]
+    height: 17.0
+
+# Where the laser scan is stale (construction clutter) - no trees here.
+exclude_trees:
+  - [[-116.1, -64.3], [-167.0, -120.6], [-232.4, -65.5], [-181.4, -9.1]]
+
+# The secure compound: the new building and its grounds, aligned with the
+# building and the street grid (about 40 deg). Where the fence would cut
+# through a building, that building's wall is the boundary.
+perimeter:
+  polygon: [[-116.1, -64.3], [-167.0, -120.6], [-232.4, -65.5], [-181.4, -9.1]]
+  fence_height: 2.4
+  post_spacing: 3.0
+  light_spacing: 30
+  gates:
+    - {at: [-148.7, -36.7], width: 6, yaw_deg: -40.2}   # faces the tree-lined street
+  breaches:
+    - {at: [-141.6, -92.5], width: 3}                   # cut fence, construction-lot side
+  guard_booth: {at: [-152.8, -41.1], yaw_deg: -40.2}
+
+# Walking people (paths loop).
+actors:
+  - name: intruder      # enters through the breach, approaches the building
+    path: [[-126.7, -98.5], [-141.6, -92.5], [-142.0, -65.9], [-145.4, -57.8], [-142.0, -65.9], [-141.6, -92.5]]
+  - name: pedestrian    # public street outside the fence: NOT a threat
+    path: [[-193.9, 14.6], [-101.7, -63.3]]

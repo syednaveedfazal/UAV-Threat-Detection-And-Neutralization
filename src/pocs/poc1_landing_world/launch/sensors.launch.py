@@ -66,7 +66,13 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             name='base_to_lidar',
-            arguments=['0', '0', '0.13', '0', '0', '0', 'base_link', 'lidar_link'],
+            # Flag form, not the old positional form: the positional style is
+            # deprecated and warns on Humble, and the flags work on both
+            # Humble and Jazzy.
+            arguments=['--x', '0', '--y', '0', '--z', '0.13',
+                       '--roll', '0', '--pitch', '0', '--yaw', '0',
+                       '--frame-id', 'base_link',
+                       '--child-frame-id', 'lidar_link'],
             condition=IfCondition(publish_static_tf),
             output='log',
         ),
@@ -74,8 +80,10 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             name='base_to_cam',
-            arguments=['0.15', '0', '0.03', '0', '0', '0',
-                       'base_link', 'front_camera_link'],
+            arguments=['--x', '0.15', '--y', '0', '--z', '0.03',
+                       '--roll', '0', '--pitch', '0', '--yaw', '0',
+                       '--frame-id', 'base_link',
+                       '--child-frame-id', 'front_camera_link'],
             condition=IfCondition(publish_static_tf),
             output='log',
         ),

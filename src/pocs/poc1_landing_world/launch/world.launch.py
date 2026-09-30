@@ -65,6 +65,13 @@ def generate_launch_description():
             prepend('GZ_SIM_SYSTEM_PLUGIN_PATH', px4_plugins)),
         SetEnvironmentVariable('GZ_SIM_SERVER_CONFIG_PATH', px4_server_config),
         SetEnvironmentVariable('GZ_IP', '127.0.0.1'),
+        # Jazzy's gz vendor packages narrow GZ_CONFIG_PATH so `gz sim` is not
+        # registered; add the system Gazebo config dir back.
+        SetEnvironmentVariable(
+            'GZ_CONFIG_PATH',
+            prepend('GZ_CONFIG_PATH', '/usr/share/gz')
+            if os.path.isfile('/usr/share/gz/sim8.yaml')
+            else os.environ.get('GZ_CONFIG_PATH', '')),
 
         ExecuteProcess(
             cmd=['gz', 'sim', '--verbose=1', '-r', '-s', *world_path],

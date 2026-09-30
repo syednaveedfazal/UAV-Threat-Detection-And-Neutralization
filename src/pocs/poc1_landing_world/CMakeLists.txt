@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.8)
+# 3.16 is the floor shipped by Ubuntu 20.04+ and avoids the deprecation
+# warning CMake >= 3.27 emits for minimums below 3.10. Jazzy ships CMake 3.28.
+cmake_minimum_required(VERSION 3.16)
 project(poc1_landing_world)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")

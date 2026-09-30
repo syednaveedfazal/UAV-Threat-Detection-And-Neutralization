@@ -22,7 +22,19 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PX4_DIR="${PX4_DIR:-$HOME/PX4-Autopilot}"
 PX4_BUILD="$PX4_DIR/build/px4_sitl_default"
-ROS_DISTRO_SETUP="${ROS_DISTRO_SETUP:-/opt/ros/humble/setup.bash}"
+# ROS distro is auto-detected so the same script works on Jazzy (Ubuntu 24.04)
+# and Humble (22.04). Newest first: Jazzy is the distro officially paired with
+# Gazebo Harmonic, so prefer it when both are installed.
+detect_ros_setup() {
+	local d
+	if [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/$ROS_DISTRO/setup.bash" ]]; then
+		echo "/opt/ros/$ROS_DISTRO/setup.bash"; return
+	fi
+	for d in kilted jazzy iron humble; do
+		[[ -f "/opt/ros/$d/setup.bash" ]] && { echo "/opt/ros/$d/setup.bash"; return; }
+	done
+}
+ROS_DISTRO_SETUP="${ROS_DISTRO_SETUP:-$(detect_ros_setup)}"
 PKG_DIR="$PROJECT_DIR/src/pocs/poc1_landing_world"
 
 WORLD="${WORLD:-landing_mission}"
@@ -163,6 +175,11 @@ wait_for() {
 	log "ready: $what"
 }
 
+# Run a Gazebo/PX4 process with ROS library paths stripped (see ROS setup below).
+gzenv() {
+	env LD_LIBRARY_PATH="${GZ_ONLY_LD-${LD_LIBRARY_PATH:-}}" GZ_CONFIG_PATH=/usr/share/gz "$@"
+}
+
 # Like wait_for, but warns instead of aborting.
 wait_for_soft() {
 	local what="$1" timeout="$2"; shift 2
@@ -232,9 +249,28 @@ fi
 # so the directory holding the world has to be searchable.
 WORLD_DIR="$(dirname "$WORLD_FILE")"
 
-if (( START_AGENT )) && ! command -v MicroXRCEAgent >/dev/null; then
-	warn "MicroXRCEAgent not found; ROS 2 PX4 topics will not appear (--no-agent to silence)"
-	START_AGENT=0
+# Pick a MicroXRCEAgent that can actually load. After an OS upgrade the old
+# /usr/local/bin build can still be first on PATH while linking libraries the
+# new release no longer ships (22.04 -> 24.04: libspdlog.so.1 is gone). It then
+# dies instantly and PX4's /fmu topics never appear, with no obvious error.
+AGENT_BIN=""
+if (( START_AGENT )); then
+	for cand in "${AGENT_BIN_OVERRIDE:-}" "$HOME/.local/bin/MicroXRCEAgent" \
+	            "$(command -v MicroXRCEAgent 2>/dev/null || true)"; do
+		[[ -n "$cand" && -x "$cand" ]] || continue
+		if ldd "$cand" 2>/dev/null | grep -q "not found"; then
+			warn "Skipping broken agent $cand (missing: $(ldd "$cand" | awk '/not found/{print $1}' | tr '\n' ' '))"
+			continue
+		fi
+		AGENT_BIN="$cand"; break
+	done
+	if [[ -z "$AGENT_BIN" ]]; then
+		warn "No working MicroXRCEAgent found; ROS 2 PX4 topics will not appear."
+		warn "  Rebuild it for this OS - see docs/JAZZY_MIGRATION.md (--no-agent to silence)"
+		START_AGENT=0
+	else
+		log "MicroXRCEAgent: $AGENT_BIN"
+	fi
 fi
 
 QGC_CANDIDATES=()
@@ -296,11 +332,45 @@ source_relaxed() {
 	set -u
 }
 
-if [[ -f "$ROS_DISTRO_SETUP" ]]; then
+if [[ -n "$ROS_DISTRO_SETUP" && -f "$ROS_DISTRO_SETUP" ]]; then
 	source_relaxed "$ROS_DISTRO_SETUP"
-	log "ROS 2 sourced: $ROS_DISTRO_SETUP"
+	log "ROS 2 sourced: $ROS_DISTRO_SETUP (${ROS_DISTRO:-unknown})"
+
+	# Jazzy's ros_gz packages pull in Gazebo "vendor" packages whose setup sets
+	# GZ_CONFIG_PATH to their own directories, which only register the
+	# transport/msgs subcommands. That hides the system /usr/share/gz/sim8.yaml,
+	# so after sourcing ROS `gz sim` prints the generic help and exits - the
+	# server "starts" and dies instantly. Put the system config dir back.
+	#
+	# Worse, the same setup puts the vendor copies of libgz-msgs/transport on
+	# LD_LIBRARY_PATH. The system Gazebo (OSRF gz-harmonic) then loads a
+	# libgz-msgs10 built differently from the one it was linked against:
+	#   libgz-sim8.so.8: undefined symbol: scc_info_Header_gz_2fmsgs_2fheader_2eproto
+	# So Gazebo and PX4 run in a "Gazebo-only" environment with every /opt/ros
+	# library path removed; only ROS nodes see the ROS environment. The two
+	# sides talk over gz-transport on the wire, so no shared libraries needed.
+	GZ_ONLY_LD="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '^/opt/ros/' | paste -sd: - || true)"
 else
-	warn "ROS 2 setup not found at $ROS_DISTRO_SETUP"
+	warn "No ROS 2 installation found under /opt/ros (looked for jazzy, humble)"
+fi
+
+# The ros_gz bridge must be built against the SAME Gazebo generation the
+# simulator uses, or it connects, reports no error, and silently delivers
+# nothing ("Unknown message type"). This exact mismatch broke the sensor
+# bridge on Humble, where the default ros-humble-ros-gz targets Fortress
+# while the simulator is Harmonic. Jazzy pairs with Harmonic natively, so
+# there the stock ros-jazzy-ros-gz-bridge is already correct.
+BRIDGE_BIN="$(command -v parameter_bridge 2>/dev/null || true)"
+[[ -z "$BRIDGE_BIN" && -n "${ROS_DISTRO:-}" ]] \
+	&& BRIDGE_BIN="/opt/ros/$ROS_DISTRO/lib/ros_gz_bridge/parameter_bridge"
+if [[ -f "$BRIDGE_BIN" ]]; then
+	if ldd "$BRIDGE_BIN" 2>/dev/null | grep -q "libignition-msgs"; then
+		warn "ros_gz bridge is built against Ignition (Fortress-era), but the"
+		warn "simulator is Gazebo $GZ_VER. Sensor topics will appear in"
+		warn "'ros2 topic list' and carry NO data. Fix on Humble with:"
+		warn "    sudo apt install ros-humble-ros-gzharmonic-bridge"
+		warn "On Jazzy the stock ros-jazzy-ros-gz-bridge is already correct."
+	fi
 fi
 
 if (( DO_BUILD )); then
@@ -356,6 +426,15 @@ fi
 if [[ -e /dev/nvidiactl ]] || command -v nvidia-smi >/dev/null 2>&1; then
 	export __NV_PRIME_RENDER_OFFLOAD=1
 	export __GLX_VENDOR_LIBRARY_NAME=nvidia
+	# The GUI renders through GLX, but the simulation SERVER renders the
+	# camera and GPU-LiDAR headless through EGL, which the GLX setting does
+	# not affect. Left alone, glvnd tries Mesa first, Mesa fails on the NVIDIA
+	# device ("failed to create dri2 screen") and silently falls back to CPU
+	# rendering: fine for a toy world, but a real-site world stalls the
+	# sensors at 0 Hz. Pin EGL to the NVIDIA driver.
+	if [[ -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+		export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+	fi
 	export __VK_LAYER_NV_optimus=NVIDIA_only
 	log "NVIDIA GPU detected - rendering offloaded to it"
 else
@@ -367,21 +446,23 @@ fi
 # ------------------------------------------------------------------ launch --
 log "World: $WORLD_FILE"
 
-spawn gz-server gz sim --verbose=1 -r -s "$WORLD_FILE"
+spawn gz-server gzenv gz sim --verbose=1 -r -s "$WORLD_FILE"
+alive_after "$SPAWN_PID" 2 || { report_crash gz-server; die "Gazebo server exited on startup"; }
 wait_for "Gazebo world '$WORLD_NAME'" 60 \
-	bash -c "gz service -i --service /world/$WORLD_NAME/scene/info 2>&1 | grep -q 'Service providers'"
+	gzenv bash -c "gz service -i --service /world/$WORLD_NAME/scene/info 2>&1 | grep -q 'Service providers'"
 
 if (( ! HEADLESS )); then
-	spawn gz-gui gz sim -g
+	spawn gz-gui gzenv gz sim -g
 fi
 
 if (( START_AGENT )); then
-	spawn microxrce MicroXRCEAgent udp4 -p 8888
+	spawn microxrce "$AGENT_BIN" udp4 -p 8888
+	alive_after "$SPAWN_PID" 2 || { report_crash microxrce; die "MicroXRCEAgent exited on startup"; }
 fi
 
 log "Starting PX4 SITL (standalone, attaching to '$WORLD_NAME')..."
 cd "$PX4_DIR"
-spawn px4 env \
+spawn px4 gzenv env \
 	PX4_GZ_STANDALONE=1 \
 	PX4_GZ_WORLD="$WORLD_NAME" \
 	PX4_SIM_MODEL="$MODEL" \
@@ -391,7 +472,7 @@ spawn px4 env \
 cd "$PROJECT_DIR"
 
 wait_for "PX4 vehicle spawned in Gazebo" 90 \
-	bash -c "gz model --list 2>/dev/null | grep -q '${MODEL#gz_}_0'"
+	gzenv bash -c "gz model --list 2>/dev/null | grep -q '${MODEL#gz_}_0'"
 # NOTE: do NOT gate readiness on "Ready for takeoff". PX4 only prints that
 # when every preflight check passes, and one of those checks is "connection to
 # the GCS". With no GCS running the simulation is perfectly healthy but that
