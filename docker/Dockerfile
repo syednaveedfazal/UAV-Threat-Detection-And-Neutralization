@@ -1,4 +1,12 @@
-FROM ubuntu:22.04
+# Ubuntu 24.04 + ROS 2 Jazzy is the officially supported pairing for Gazebo
+# Harmonic. Override for the old combination with:
+#   docker build --build-arg UBUNTU_VERSION=22.04 --build-arg ROS_DISTRO=humble .
+# Note that Humble + Harmonic needs ros-humble-ros-gzharmonic-bridge instead of
+# ros-humble-ros-gz-bridge, which this file does not special-case.
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
+ARG ROS_DISTRO=jazzy
+ENV ROS_DISTRO=${ROS_DISTRO}
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install basic tools and locales
@@ -16,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
  && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - \
  && sh -c 'echo "deb http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/ros2.list' \
  && apt-get update \
- && apt-get install -y ros-humble-desktop python3-rosdep python3-colcon-common-extensions \
+ && apt-get install -y ros-${ROS_DISTRO}-desktop python3-rosdep python3-colcon-common-extensions \
  && rm -rf /var/lib/apt/lists/*
 
 # Install Ignition Gazebo (gz-harmonic) and ros_gz
@@ -25,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && wget -qO - https://packages.osrfoundation.org/gazebo.key | apt-key add - \
     && sh -c 'echo "deb http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list' \
     && apt-get update \
-    && apt-get install -y gz-harmonic ros-humble-ros-gz ros-humble-ros-gz-bridge \
+    && apt-get install -y gz-harmonic ros-${ROS_DISTRO}-ros-gz ros-${ROS_DISTRO}-ros-gz-bridge \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Micro XRCE-DDS Agent prerequisites

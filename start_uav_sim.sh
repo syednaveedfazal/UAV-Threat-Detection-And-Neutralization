@@ -22,7 +22,19 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PX4_DIR="${PX4_DIR:-$HOME/PX4-Autopilot}"
 PX4_BUILD="$PX4_DIR/build/px4_sitl_default"
-ROS_DISTRO_SETUP="${ROS_DISTRO_SETUP:-/opt/ros/humble/setup.bash}"
+# ROS distro is auto-detected so the same script works on Jazzy (Ubuntu 24.04)
+# and Humble (22.04). Newest first: Jazzy is the distro officially paired with
+# Gazebo Harmonic, so prefer it when both are installed.
+detect_ros_setup() {
+	local d
+	if [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/$ROS_DISTRO/setup.bash" ]]; then
+		echo "/opt/ros/$ROS_DISTRO/setup.bash"; return
+	fi
+	for d in kilted jazzy iron humble; do
+		[[ -f "/opt/ros/$d/setup.bash" ]] && { echo "/opt/ros/$d/setup.bash"; return; }
+	done
+}
+ROS_DISTRO_SETUP="${ROS_DISTRO_SETUP:-$(detect_ros_setup)}"
 PKG_DIR="$PROJECT_DIR/src/pocs/poc1_landing_world"
 
 WORLD="${WORLD:-landing_mission}"
@@ -34,6 +46,7 @@ HEADLESS=0
 START_QGC=1
 START_AGENT=1
 START_MISSION=0
+START_SENSORS=0
 DO_BUILD=0
 
 QGC_BIN="${QGC_BIN:-}"
@@ -49,6 +62,9 @@ Usage: $(basename "$0") [options]
   --no-qgc        Do not start QGroundControl
   --no-agent      Do not start MicroXRCEAgent
   --mission       Also run the ROS 2 mission_control node once PX4 is ready
+  --model NAME    Vehicle model, e.g. gz_x500 (default) or
+                  gz_x500_threat_scanner (3D LiDAR + forward camera)
+  --sensors       Bridge LiDAR / camera topics into ROS 2
   --build         colcon build the ROS workspace before starting
   --world NAME    World basename in $PKG_DIR/worlds (default: $WORLD)
   -h, --help      Show this help
@@ -65,6 +81,8 @@ while [[ $# -gt 0 ]]; do
 		--mission)   START_MISSION=1 ;;
 		--build)     DO_BUILD=1 ;;
 		--world)     WORLD="$2"; shift ;;
+		--model)     MODEL="$2"; shift ;;
+		--sensors)   START_SENSORS=1 ;;
 		-h|--help)   usage; exit 0 ;;
 		*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -117,9 +135,30 @@ trap cleanup INT TERM EXIT
 spawn() {
 	local name="$1"; shift
 	"$@" > "$LOG_DIR/$name.log" 2>&1 < /dev/null &
-	local pid=$!
-	track "$pid"
-	log "started $name (pid $pid) -> $LOG_DIR/$name.log"
+	SPAWN_PID=$!
+	track "$SPAWN_PID"
+	log "started $name (pid $SPAWN_PID) -> $LOG_DIR/$name.log"
+}
+
+# Did a just-spawned process survive its first few seconds? A crash-on-startup
+# (a missing library, an incompatible AppImage) otherwise goes unnoticed and
+# the script cheerfully reports "Simulation is up".
+alive_after() {
+	local pid="$1" seconds="$2"
+	local i=0
+	while (( i < seconds )); do
+		kill -0 "$pid" 2>/dev/null || return 1
+		sleep 1
+		i=$((i + 1))
+	done
+	kill -0 "$pid" 2>/dev/null
+}
+
+# Print the most useful lines from a crashed process's log.
+report_crash() {
+	local name="$1"
+	warn "$name exited immediately. Last lines of $LOG_DIR/$name.log:"
+	tail -n 4 "$LOG_DIR/$name.log" 2>/dev/null | sed 's/^/    /' || true
 }
 
 # wait_for <description> <timeout-seconds> <command...>
@@ -131,6 +170,26 @@ wait_for() {
 		waited=$((waited + 1))
 		if (( waited >= timeout )); then
 			die "Timed out after ${timeout}s waiting for: $what"
+		fi
+	done
+	log "ready: $what"
+}
+
+# Run a Gazebo/PX4 process with ROS library paths stripped (see ROS setup below).
+gzenv() {
+	env LD_LIBRARY_PATH="${GZ_ONLY_LD-${LD_LIBRARY_PATH:-}}" GZ_CONFIG_PATH=/usr/share/gz "$@"
+}
+
+# Like wait_for, but warns instead of aborting.
+wait_for_soft() {
+	local what="$1" timeout="$2"; shift 2
+	local waited=0
+	while ! "$@" >/dev/null 2>&1; do
+		sleep 1
+		waited=$((waited + 1))
+		if (( waited >= timeout )); then
+			warn "not reached within ${timeout}s: $what"
+			return 1
 		fi
 	done
 	log "ready: $what"
@@ -163,34 +222,95 @@ GZ_VER="$(gz sim --versions 2>/dev/null | tr -d ' ' | sed -n '1p' || true)"
 [[ -n "$GZ_VER" ]] || die "'gz sim' not working"
 log "Gazebo $GZ_VER"
 
-[[ -f "$PKG_DIR/worlds/$WORLD.sdf" ]] || die "World not found: $PKG_DIR/worlds/$WORLD.sdf"
+# Resolve the world file. Accept a bare name in the package worlds/ directory
+# (.sdf or .world - gazebo_terrain_generator emits .world), or a path to a
+# world anywhere on disk.
+WORLD_FILE=""
+for cand in \
+	"$WORLD" \
+	"$PKG_DIR/worlds/$WORLD.sdf" \
+	"$PKG_DIR/worlds/$WORLD.world" \
+	"$PKG_DIR/worlds/$WORLD"
+do
+	if [[ -f "$cand" ]]; then WORLD_FILE="$(readlink -f "$cand")"; break; fi
+done
+[[ -n "$WORLD_FILE" ]] || die "World not found: tried '$WORLD', \
+'$PKG_DIR/worlds/$WORLD.sdf' and '$PKG_DIR/worlds/$WORLD.world'"
 
-# The world name inside the SDF must equal the file stem: PX4 waits on the
-# service /world/<PX4_GZ_WORLD>/scene/info.
-if ! grep -q "<world name=\"$WORLD\">" "$PKG_DIR/worlds/$WORLD.sdf"; then
-	die "worlds/$WORLD.sdf must contain <world name=\"$WORLD\"> for PX4 to find it."
+# PX4 waits on /world/<name>/scene/info, where <name> is the name declared
+# INSIDE the SDF - not the filename. Read it rather than assuming they match.
+WORLD_NAME="$(grep -om1 '<world name="[^"]*"' "$WORLD_FILE" | sed 's/.*name="//; s/"//')"
+[[ -n "$WORLD_NAME" ]] || die "No <world name=\"...\"> element in $WORLD_FILE"
+if [[ "$WORLD_NAME" != "$WORLD" ]]; then
+	log "World file declares name '$WORLD_NAME' (file: $(basename "$WORLD_FILE"))"
 fi
 
-if (( START_AGENT )) && ! command -v MicroXRCEAgent >/dev/null; then
-	warn "MicroXRCEAgent not found; ROS 2 PX4 topics will not appear (--no-agent to silence)"
-	START_AGENT=0
+# Terrain worlds reference their textures with relative URIs (mesh/aerial.png),
+# so the directory holding the world has to be searchable.
+WORLD_DIR="$(dirname "$WORLD_FILE")"
+
+# Pick a MicroXRCEAgent that can actually load. After an OS upgrade the old
+# /usr/local/bin build can still be first on PATH while linking libraries the
+# new release no longer ships (22.04 -> 24.04: libspdlog.so.1 is gone). It then
+# dies instantly and PX4's /fmu topics never appear, with no obvious error.
+AGENT_BIN=""
+if (( START_AGENT )); then
+	for cand in "${AGENT_BIN_OVERRIDE:-}" "$HOME/.local/bin/MicroXRCEAgent" \
+	            "$(command -v MicroXRCEAgent 2>/dev/null || true)"; do
+		[[ -n "$cand" && -x "$cand" ]] || continue
+		if ldd "$cand" 2>/dev/null | grep -q "not found"; then
+			warn "Skipping broken agent $cand (missing: $(ldd "$cand" | awk '/not found/{print $1}' | tr '\n' ' '))"
+			continue
+		fi
+		AGENT_BIN="$cand"; break
+	done
+	if [[ -z "$AGENT_BIN" ]]; then
+		warn "No working MicroXRCEAgent found; ROS 2 PX4 topics will not appear."
+		warn "  Rebuild it for this OS - see docs/JAZZY_MIGRATION.md (--no-agent to silence)"
+		START_AGENT=0
+	else
+		log "MicroXRCEAgent: $AGENT_BIN"
+	fi
+fi
+
+QGC_CANDIDATES=()
+
+if (( START_QGC )); then
+	# Already running? Do not start a second one - it would fight for UDP
+	# 14550/14540 and the existing instance is known to work.
+	if pgrep -f 'QGroundControl' >/dev/null 2>&1; then
+		log "QGroundControl is already running; not starting another"
+		START_QGC=0
+	fi
 fi
 
 if (( START_QGC )); then
-	if [[ -z "$QGC_BIN" ]]; then
-		QGC_BIN="$(command -v qgroundcontrol 2>/dev/null || true)"
+	if [[ -n "$QGC_BIN" ]]; then
+		QGC_CANDIDATES=("$QGC_BIN")
+	else
+		# A packaged install wins; otherwise try AppImages newest-first.
+		# NOTE: newest is not necessarily runnable. Recent QGroundControl
+		# AppImages are built against glibc 2.38 and will not start on
+		# Ubuntu 22.04 (glibc 2.35); an older AppImage alongside it still
+		# works. So collect every candidate and try them in order rather
+		# than committing to one.
+		local_qgc="$(command -v qgroundcontrol 2>/dev/null || true)"
+		[[ -n "$local_qgc" ]] && QGC_CANDIDATES+=("$local_qgc")
+		while IFS= read -r -d '' f; do
+			QGC_CANDIDATES+=("$f")
+		done < <(find "$HOME/Downloads" "$HOME" -maxdepth 1 \
+			-name 'QGroundControl*.AppImage' -printf '%T@\t%p\0' 2>/dev/null \
+			| sort -zrn | cut -z -f2-)
 	fi
-	if [[ -z "$QGC_BIN" ]]; then
-		# Fall back to an AppImage in the usual download locations.
-		QGC_BIN="$(ls -t "$HOME"/Downloads/QGroundControl*.AppImage \
-		               "$HOME"/QGroundControl*.AppImage 2>/dev/null | head -n1 || true)"
-	fi
-	if [[ -z "$QGC_BIN" || ! -e "$QGC_BIN" ]]; then
+
+	if (( ${#QGC_CANDIDATES[@]} == 0 )); then
 		warn "QGroundControl not found; skipping (--no-qgc to silence)"
 		START_QGC=0
 	else
-		[[ -x "$QGC_BIN" ]] || chmod +x "$QGC_BIN" 2>/dev/null || true
-		log "QGroundControl: $QGC_BIN"
+		for f in "${QGC_CANDIDATES[@]}"; do
+			[[ -x "$f" ]] || chmod +x "$f" 2>/dev/null || true
+		done
+		log "QGroundControl candidates: ${#QGC_CANDIDATES[@]}"
 	fi
 fi
 
@@ -212,11 +332,45 @@ source_relaxed() {
 	set -u
 }
 
-if [[ -f "$ROS_DISTRO_SETUP" ]]; then
+if [[ -n "$ROS_DISTRO_SETUP" && -f "$ROS_DISTRO_SETUP" ]]; then
 	source_relaxed "$ROS_DISTRO_SETUP"
-	log "ROS 2 sourced: $ROS_DISTRO_SETUP"
+	log "ROS 2 sourced: $ROS_DISTRO_SETUP (${ROS_DISTRO:-unknown})"
+
+	# Jazzy's ros_gz packages pull in Gazebo "vendor" packages whose setup sets
+	# GZ_CONFIG_PATH to their own directories, which only register the
+	# transport/msgs subcommands. That hides the system /usr/share/gz/sim8.yaml,
+	# so after sourcing ROS `gz sim` prints the generic help and exits - the
+	# server "starts" and dies instantly. Put the system config dir back.
+	#
+	# Worse, the same setup puts the vendor copies of libgz-msgs/transport on
+	# LD_LIBRARY_PATH. The system Gazebo (OSRF gz-harmonic) then loads a
+	# libgz-msgs10 built differently from the one it was linked against:
+	#   libgz-sim8.so.8: undefined symbol: scc_info_Header_gz_2fmsgs_2fheader_2eproto
+	# So Gazebo and PX4 run in a "Gazebo-only" environment with every /opt/ros
+	# library path removed; only ROS nodes see the ROS environment. The two
+	# sides talk over gz-transport on the wire, so no shared libraries needed.
+	GZ_ONLY_LD="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '^/opt/ros/' | paste -sd: - || true)"
 else
-	warn "ROS 2 setup not found at $ROS_DISTRO_SETUP"
+	warn "No ROS 2 installation found under /opt/ros (looked for jazzy, humble)"
+fi
+
+# The ros_gz bridge must be built against the SAME Gazebo generation the
+# simulator uses, or it connects, reports no error, and silently delivers
+# nothing ("Unknown message type"). This exact mismatch broke the sensor
+# bridge on Humble, where the default ros-humble-ros-gz targets Fortress
+# while the simulator is Harmonic. Jazzy pairs with Harmonic natively, so
+# there the stock ros-jazzy-ros-gz-bridge is already correct.
+BRIDGE_BIN="$(command -v parameter_bridge 2>/dev/null || true)"
+[[ -z "$BRIDGE_BIN" && -n "${ROS_DISTRO:-}" ]] \
+	&& BRIDGE_BIN="/opt/ros/$ROS_DISTRO/lib/ros_gz_bridge/parameter_bridge"
+if [[ -f "$BRIDGE_BIN" ]]; then
+	if ldd "$BRIDGE_BIN" 2>/dev/null | grep -q "libignition-msgs"; then
+		warn "ros_gz bridge is built against Ignition (Fortress-era), but the"
+		warn "simulator is Gazebo $GZ_VER. Sensor topics will appear in"
+		warn "'ros2 topic list' and carry NO data. Fix on Humble with:"
+		warn "    sudo apt install ros-humble-ros-gzharmonic-bridge"
+		warn "On Jazzy the stock ros-jazzy-ros-gz-bridge is already correct."
+	fi
 fi
 
 if (( DO_BUILD )); then
@@ -237,29 +391,80 @@ fi
 # loads the physics, sensors, IMU, magnetometer and NavSat systems PX4 needs.
 source_relaxed "$PX4_BUILD/rootfs/gz_env.sh"
 # Append this project's models so the world's landing pads resolve.
-export GZ_SIM_RESOURCE_PATH="$GZ_SIM_RESOURCE_PATH:$PKG_DIR/models:$PKG_DIR/worlds"
+export GZ_SIM_RESOURCE_PATH="$GZ_SIM_RESOURCE_PATH:$PKG_DIR/models:$PKG_DIR/worlds:$WORLD_DIR"
 export GZ_IP=127.0.0.1
 
-# ------------------------------------------------------------------ launch --
-log "World: $PKG_DIR/worlds/$WORLD.sdf"
+# A georeferenced terrain world carries the real-world origin it was generated
+# for. Hand it to PX4 so GPS, the QGC map and the terrain all agree.
+if [[ -z "${PX4_HOME_LAT:-}" ]]; then
+	t_lat="$(grep -om1 '<latitude_deg>[^<]*' "$WORLD_FILE" | cut -d'>' -f2 || true)"
+	t_lon="$(grep -om1 '<longitude_deg>[^<]*' "$WORLD_FILE" | cut -d'>' -f2 || true)"
+	t_alt="$(grep -om1 '<elevation>[^<]*' "$WORLD_FILE" | cut -d'>' -f2 || true)"
+	if [[ -n "$t_lat" && -n "$t_lon" ]]; then
+		export PX4_HOME_LAT="$t_lat"
+		export PX4_HOME_LON="$t_lon"
+		export PX4_HOME_ALT="${t_alt:-0}"
+		log "World origin: lat=$t_lat lon=$t_lon alt=${t_alt:-0}"
+	fi
+fi
 
-spawn gz-server gz sim --verbose=1 -r -s "$PKG_DIR/worlds/$WORLD.sdf"
-wait_for "Gazebo world '$WORLD'" 60 \
-	bash -c "gz service -i --service /world/$WORLD/scene/info 2>&1 | grep -q 'Service providers'"
+# In standalone mode PX4 does NOT re-source gz_env.sh, so PX4_GZ_MODELS is ours
+# to set. Point it at this repository when the requested vehicle lives here, so
+# custom models do not have to be copied into the PX4 tree.
+MODEL_DIR_NAME="${MODEL#gz_}"
+if [[ -d "$PKG_DIR/models/$MODEL_DIR_NAME" ]]; then
+	export PX4_GZ_MODELS="$PKG_DIR/models"
+	log "Vehicle model from this repo: $PKG_DIR/models/$MODEL_DIR_NAME"
+else
+	log "Vehicle model from PX4: $PX4_GZ_MODELS/$MODEL_DIR_NAME"
+fi
+
+# gpu_lidar and camera sensors render on the GPU. On a hybrid laptop the
+# discrete GPU must be selected explicitly or Gazebo silently uses the Intel
+# iGPU, which makes a dense LiDAR crawl. These variables are harmless when no
+# NVIDIA driver is present.
+if [[ -e /dev/nvidiactl ]] || command -v nvidia-smi >/dev/null 2>&1; then
+	export __NV_PRIME_RENDER_OFFLOAD=1
+	export __GLX_VENDOR_LIBRARY_NAME=nvidia
+	# The GUI renders through GLX, but the simulation SERVER renders the
+	# camera and GPU-LiDAR headless through EGL, which the GLX setting does
+	# not affect. Left alone, glvnd tries Mesa first, Mesa fails on the NVIDIA
+	# device ("failed to create dri2 screen") and silently falls back to CPU
+	# rendering: fine for a toy world, but a real-site world stalls the
+	# sensors at 0 Hz. Pin EGL to the NVIDIA driver.
+	if [[ -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+		export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+	fi
+	export __VK_LAYER_NV_optimus=NVIDIA_only
+	log "NVIDIA GPU detected - rendering offloaded to it"
+else
+	warn "No NVIDIA driver loaded; Gazebo will render on the Intel iGPU."
+	warn "  A 16-beam LiDAR will be slow. Install with:"
+	warn "    sudo ubuntu-drivers install nvidia:595   # then reboot"
+fi
+
+# ------------------------------------------------------------------ launch --
+log "World: $WORLD_FILE"
+
+spawn gz-server gzenv gz sim --verbose=1 -r -s "$WORLD_FILE"
+alive_after "$SPAWN_PID" 2 || { report_crash gz-server; die "Gazebo server exited on startup"; }
+wait_for "Gazebo world '$WORLD_NAME'" 60 \
+	gzenv bash -c "gz service -i --service /world/$WORLD_NAME/scene/info 2>&1 | grep -q 'Service providers'"
 
 if (( ! HEADLESS )); then
-	spawn gz-gui gz sim -g
+	spawn gz-gui gzenv gz sim -g
 fi
 
 if (( START_AGENT )); then
-	spawn microxrce MicroXRCEAgent udp4 -p 8888
+	spawn microxrce "$AGENT_BIN" udp4 -p 8888
+	alive_after "$SPAWN_PID" 2 || { report_crash microxrce; die "MicroXRCEAgent exited on startup"; }
 fi
 
-log "Starting PX4 SITL (standalone, attaching to '$WORLD')..."
+log "Starting PX4 SITL (standalone, attaching to '$WORLD_NAME')..."
 cd "$PX4_DIR"
-spawn px4 env \
+spawn px4 gzenv env \
 	PX4_GZ_STANDALONE=1 \
-	PX4_GZ_WORLD="$WORLD" \
+	PX4_GZ_WORLD="$WORLD_NAME" \
 	PX4_SIM_MODEL="$MODEL" \
 	PX4_SYS_AUTOSTART="$AUTOSTART" \
 	PX4_GZ_MODEL_POSE="$SPAWN_POSE" \
@@ -267,12 +472,54 @@ spawn px4 env \
 cd "$PROJECT_DIR"
 
 wait_for "PX4 vehicle spawned in Gazebo" 90 \
-	bash -c "gz model --list 2>/dev/null | grep -q '${MODEL#gz_}_0'"
-wait_for "PX4 ready for takeoff" 90 \
-	bash -c "grep -aq 'Ready for takeoff' '$LOG_DIR/px4.log'"
+	gzenv bash -c "gz model --list 2>/dev/null | grep -q '${MODEL#gz_}_0'"
+# NOTE: do NOT gate readiness on "Ready for takeoff". PX4 only prints that
+# when every preflight check passes, and one of those checks is "connection to
+# the GCS". With no GCS running the simulation is perfectly healthy but that
+# line never appears. Gate on PX4 finishing its startup script instead.
+wait_for "PX4 boot complete" 90 \
+	bash -c "grep -aq 'Startup script returned successfully' '$LOG_DIR/px4.log'"
+
+# Without a GCS the datalink-loss check keeps preflight red and the vehicle
+# refuses to arm, which would break --mission in a headless run. Clear it.
+if ! pgrep -f 'QGroundControl' >/dev/null 2>&1; then
+	log "No GCS present - clearing datalink-loss arming check (NAV_DLL_ACT=0)"
+	"$PX4_BUILD/bin/px4-param" set NAV_DLL_ACT 0 >/dev/null 2>&1 || true
+fi
+
+wait_for_soft "PX4 preflight green (Ready for takeoff)" 45 \
+	bash -c "grep -aq 'Ready for takeoff' '$LOG_DIR/px4.log'" || true
 
 if (( START_QGC )); then
-	spawn qgc "$QGC_BIN"
+	qgc_started=0
+	for qgc in "${QGC_CANDIDATES[@]}"; do
+		log "Trying QGroundControl: $qgc"
+		spawn qgc "$qgc"
+		if alive_after "$SPAWN_PID" 6; then
+			log "QGroundControl running: $qgc"
+			qgc_started=1
+			break
+		fi
+		report_crash qgc
+		if grep -q "GLIBC_2\.\(3[6-9]\|[4-9][0-9]\)' not found" "$LOG_DIR/qgc.log" 2>/dev/null; then
+			warn "  -> this AppImage needs a newer glibc than this system has"
+			warn "     ($(ldd --version | head -n1)). Trying an older build."
+		fi
+	done
+	if (( ! qgc_started )); then
+		warn "Could not start QGroundControl. The simulation is unaffected;"
+		warn "start a working GCS yourself, or re-run with --no-qgc."
+	fi
+fi
+
+if (( START_SENSORS )); then
+	log "Bridging LiDAR / camera into ROS 2..."
+	spawn sensors ros2 launch poc1_landing_world sensors.launch.py
+	if alive_after "$SPAWN_PID" 5; then
+		log "sensor bridge running"
+	else
+		report_crash sensors
+	fi
 fi
 
 if (( START_MISSION )); then
@@ -287,7 +534,7 @@ cat <<EOF
 
   Simulation is up.
 
-    Gazebo world : $WORLD   (server$( ((HEADLESS)) && echo ", headless" || echo " + GUI"))
+    Gazebo world : $WORLD_NAME   (server$( ((HEADLESS)) && echo ", headless" || echo " + GUI"))
     Vehicle      : ${MODEL#gz_}_0
     MAVLink      : udp 14550 (GCS)   udp 14540 (onboard/offboard)
     uXRCE-DDS    : udp 8888  $( ((START_AGENT)) || echo "(agent not started)" )
