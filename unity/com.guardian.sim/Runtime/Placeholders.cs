@@ -32,6 +32,33 @@ namespace Guardian.Sim
             return go;
         }
 
+        /// <summary>
+        /// x500-sized quadcopter stand-in. Local axes follow Frames.RosToUnity applied
+        /// to the ROS body frame: +X forward, +Y up, +Z left. Red arm = front.
+        /// </summary>
+        public static GameObject Drone(Transform parent, int layer)
+        {
+            var root = new GameObject("Drone body");
+            root.transform.SetParent(parent, false);
+            var body = Prim(PrimitiveType.Cube, root.transform, "frame", new Color(0.15f, 0.15f, 0.17f), false);
+            body.transform.localScale = new Vector3(0.18f, 0.07f, 0.18f);
+            for (int i = 0; i < 4; i++)
+            {
+                float a = 45 + 90 * i;
+                var dir = Quaternion.Euler(0, a, 0) * Vector3.right;
+                bool front = i == 0 || i == 3;          // +X side
+                var arm = Prim(PrimitiveType.Cube, root.transform, "arm", front ? new Color(0.8f, 0.1f, 0.1f) : new Color(0.2f, 0.2f, 0.22f), false);
+                arm.transform.localPosition = dir * 0.13f;
+                arm.transform.localRotation = Quaternion.Euler(0, a, 0);
+                arm.transform.localScale = new Vector3(0.26f, 0.02f, 0.025f);
+                var rotor = Prim(PrimitiveType.Cylinder, root.transform, "rotor", new Color(0.35f, 0.35f, 0.38f), false);
+                rotor.transform.localPosition = dir * 0.25f + Vector3.up * 0.03f;
+                rotor.transform.localScale = new Vector3(0.25f, 0.004f, 0.25f);
+            }
+            foreach (var t in root.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = layer;
+            return root;
+        }
+
         /// <summary>Box from a manifest perimeter part: size = [length along yaw, width, height].</summary>
         public static GameObject Box(Transform parent, Part p, Color c)
         {

@@ -32,6 +32,8 @@ namespace Guardian.Sim
         public SceneManifest Manifest { get; private set; }
         public Transform SiteRoot { get; private set; }
         public string LastReport { get; private set; } = "";
+        /// <summary>True once LoadAsync has finished building the site (false again after Unload).</summary>
+        public bool IsLoaded { get; private set; }
 
         readonly List<GltfImport> _imports = new();
 
@@ -129,10 +131,12 @@ namespace Guardian.Sim
                          $"{Manifest.Assets.Buildings.Nodes.Count} building meshes, {nTrees} trees, " +
                          $"{nParts} perimeter parts, {Manifest.Actors.Count} people; {sun}";
             Debug.Log("[Guardian] " + LastReport);
+            IsLoaded = true;
         }
 
         public void Unload()
         {
+            IsLoaded = false;
             if (SiteRoot) Placeholders.Destroy(SiteRoot.gameObject);
             SiteRoot = null;
             DisposeImports();
@@ -175,7 +179,7 @@ namespace Guardian.Sim
             var utc = SolarPosition.LocalToUtc(Manifest.Sun.LocalTime, Manifest.Sun.Timezone ?? "UTC");
             var o = Manifest.Frame.OriginWgs84;
             var (el, az) = SolarPosition.Compute(utc, o.Lat, o.Lon);
-            var light = FindObjectsByType<Light>(FindObjectsSortMode.None)
+            var light = FindObjectsByType<Light>()
                         .FirstOrDefault(l => l.type == LightType.Directional);
             if (light == null) return $"sun elevation {el:F1} deg, azimuth {az:F1} deg (no directional light in scene)";
             light.transform.rotation = SolarPosition.LightRotation(el, az);

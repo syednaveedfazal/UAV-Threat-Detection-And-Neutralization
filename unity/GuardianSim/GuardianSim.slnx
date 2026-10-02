@@ -1,7 +1,7 @@
 ﻿<Solution>
   <Project Path="Guardian.Sim.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
-  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Guardian.Sim.Tests.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Guardian.Sim.Editor.csproj" />
 </Solution>

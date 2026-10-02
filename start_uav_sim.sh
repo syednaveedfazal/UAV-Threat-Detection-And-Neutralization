@@ -47,9 +47,15 @@ START_QGC=1
 START_AGENT=1
 START_MISSION=0
 START_SENSORS=0
+START_UNITY=0
+START_JOY=0
+GZ_GUI_FORCED=0
 DO_BUILD=0
 
 QGC_BIN="${QGC_BIN:-}"
+# Unity player built by GuardianMenu.BuildPlayer; region compound (fast) or full
+UNITY_PLAYER="${UNITY_PLAYER:-$PROJECT_DIR/unity/GuardianSim/Build/GuardianSim.x86_64}"
+UNITY_REGION="${UNITY_REGION:-compound}"
 
 LOG_DIR="$PROJECT_DIR/.sim_logs"
 
@@ -65,6 +71,14 @@ Usage: $(basename "$0") [options]
   --model NAME    Vehicle model, e.g. gz_x500 (default) or
                   gz_x500_threat_scanner (3D LiDAR + forward camera)
   --sensors       Bridge LiDAR / camera topics into ROS 2
+  --unity         Photoreal gimbal camera from Unity (docs/UNITY_BRIDGE.md):
+                  starts the bridge and the Unity player if built, else use the
+                  editor (Guardian > Play Drone Camera). Implies --headless.
+                  Needs --model gz_x500_threat_scanner (it publishes the pose).
+  --gz-gui        Keep the Gazebo GUI with --unity
+  --joystick      Fly with a game controller and scan with the LiDAR
+                  (poc3_manual_scan: START take off, B land, Y record, X save).
+                  Implies --sensors; not together with --mission.
   --build         colcon build the ROS workspace before starting
   --world NAME    World basename in $PKG_DIR/worlds (default: $WORLD)
   -h, --help      Show this help
@@ -83,11 +97,19 @@ while [[ $# -gt 0 ]]; do
 		--world)     WORLD="$2"; shift ;;
 		--model)     MODEL="$2"; shift ;;
 		--sensors)   START_SENSORS=1 ;;
+		--unity)     START_UNITY=1 ;;
+		--gz-gui)    GZ_GUI_FORCED=1 ;;
+		--joystick)  START_JOY=1 ;;
 		-h|--help)   usage; exit 0 ;;
 		*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
 	shift
 done
+# Unity is the viewer; the Gazebo GUI would only compete for the 6 GB GPU.
+(( START_UNITY && ! GZ_GUI_FORCED )) && HEADLESS=1
+# The scanner needs the LiDAR; and two nodes must never command PX4 at once.
+(( START_JOY )) && START_SENSORS=1
+(( START_JOY && START_MISSION )) && { echo '--joystick and --mission both fly the drone; pick one' >&2; exit 1; }
 
 # ------------------------------------------------------------------ helpers --
 PIDS=()
@@ -197,6 +219,22 @@ wait_for_soft() {
 
 # ----------------------------------------------------------- prerequisites --
 log "Checking prerequisites..."
+
+# A second stack cannot start next to a running one: the agent's UDP 8888 and
+# PX4's MAVLink ports are taken, and a second PX4 would attach to the old world.
+# Say so up front instead of failing half-way with "bind error errno 98".
+# Matched on the executable (not anywhere in the command line), so a shell or
+# editor that merely mentions these names is not mistaken for a simulation.
+leftover=$(ps -eo pid=,args= | awk '{
+	exe = $2; sub(/.*\//, "", exe); script = $3; sub(/.*\//, "", script)
+	if ((exe == "gz" && $3 == "sim" && / -s /) || exe == "px4" || exe == "MicroXRCEAgent" ||
+	    (exe ~ /^python3?$/ && script == "unity_bridge.py")) print
+}')
+if [[ -n "$leftover" ]]; then
+	warn "A simulation is already running:"
+	while IFS= read -r line; do warn "    ${line:0:110}"; done <<< "$leftover"
+	die "Stop it first (Ctrl+C in its terminal, or: kill $(echo "$leftover" | awk '{print $1}' | tr '\n' ' '))"
+fi
 
 [[ -d "$PX4_DIR" ]] || die "PX4 source not found at $PX4_DIR (set PX4_DIR)"
 [[ -x "$PX4_BUILD/bin/px4" ]] || die \
@@ -522,6 +560,38 @@ if (( START_SENSORS )); then
 	fi
 fi
 
+if (( START_UNITY )); then
+	[[ "$MODEL" == gz_x500_threat_scanner ]] \
+		|| warn "--unity: model $MODEL has no PosePublisher; use --model gz_x500_threat_scanner"
+	log "Starting the Unity camera bridge..."
+	# /clock is already bridged by the sensors launch; do not publish it twice.
+	spawn unity-bridge ros2 launch poc2_unity_camera unity_camera.launch.py \
+		model:="${MODEL#gz_}_0" clock:="$( ((START_SENSORS)) && echo false || echo true)"
+	alive_after "$SPAWN_PID" 4 || { report_crash unity-bridge; die "Unity bridge exited on startup (built? use --build)"; }
+	if [[ -x "$UNITY_PLAYER" ]]; then
+		log "Starting Unity player ($UNITY_REGION): $UNITY_PLAYER"
+		spawn unity-player "$UNITY_PLAYER" --region "$UNITY_REGION" \
+			-logFile "$LOG_DIR/unity-player-engine.log"
+		alive_after "$SPAWN_PID" 5 || report_crash unity-player
+	else
+		warn "No Unity player at $UNITY_PLAYER - use the editor instead:"
+		warn "  open unity/GuardianSim, then Guardian > Play Drone Camera (compound)"
+		warn "  (build a player: Unity -batchmode -quit -projectPath unity/GuardianSim \\"
+		warn "     -executeMethod Guardian.Sim.Editor.GuardianMenu.BuildPlayer)"
+	fi
+fi
+
+if (( START_JOY )); then
+	compgen -G '/dev/input/js*' >/dev/null \
+		|| warn "No game controller found (/dev/input/js*). Connect one by USB or Bluetooth; the driver picks it up."
+	log "Starting game-controller flight + LiDAR scan recorder (rviz2 opens)..."
+	spawn joystick ros2 launch poc3_manual_scan manual_scan.launch.py \
+		model:="${MODEL#gz_}_0" world:="$WORLD_NAME" \
+		pose_bridge:="$( ((START_UNITY)) && echo false || echo true)" \
+		rviz:="${JOY_RVIZ:-true}"
+	alive_after "$SPAWN_PID" 4 || { report_crash joystick; die "manual flight exited on startup (built? use --build)"; }
+fi
+
 if (( START_MISSION )); then
 	log "Waiting for PX4 ROS 2 topics before starting the mission..."
 	wait_for "ROS 2 topic /fmu/out/vehicle_status_v4" 60 \
@@ -539,6 +609,9 @@ cat <<EOF
     MAVLink      : udp 14550 (GCS)   udp 14540 (onboard/offboard)
     uXRCE-DDS    : udp 8888  $( ((START_AGENT)) || echo "(agent not started)" )
     Logs         : $LOG_DIR
+$( ((START_UNITY)) && echo "    Unity camera : /unity_cam/image_raw  /unity_cam/camera_info  (bridge 127.0.0.1:5700)" )
+$( ((START_JOY)) && echo "    Controller   : START take off | sticks fly (Mode 2) | Y record scan | X save | B land
+                   scans -> ~/UAV/data/scans/<date_time>/  (log: .sim_logs/joystick.log)" )
 
   Useful checks:
     gz model --list

@@ -60,6 +60,29 @@ namespace Guardian.Sim.Editor
             EditorApplication.isPlaying = true;
         }
 
+        /// <summary>
+        /// Play with the drone: the site plus a DroneRig that follows Gazebo's drone
+        /// through the bridge (start it first: ros2 launch poc2_unity_camera
+        /// unity_camera.launch.py, or ./start_uav_sim.sh ... --unity). The gimbal
+        /// feed is drawn bottom-right; the Main Camera chases the drone.
+        /// </summary>
+        [MenuItem("Guardian/Play Drone Camera (compound)", priority = 6)]
+        static void PlayDrone() => PlayDroneIn(SiteRegion.Compound);
+
+        [MenuItem("Guardian/Play Drone Camera (full 600 m)", priority = 7)]
+        static void PlayDroneFull() => PlayDroneIn(SiteRegion.Full);
+
+        static void PlayDroneIn(SiteRegion region)
+        {
+            if (EditorApplication.isPlaying) { EditorApplication.isPlaying = false; return; }
+            if (UnityEngine.Object.FindAnyObjectByType<DroneRig>(FindObjectsInactive.Include) == null)
+            {
+                var rig = new GameObject("Guardian Drone").AddComponent<DroneRig>();
+                Undo.RegisterCreatedObjectUndo(rig.gameObject, "Create Guardian Drone");
+            }
+            PlaySite(region);
+        }
+
         [MenuItem("Guardian/Unload Site", priority = 3)]
         static void Unload() => FindLoader()?.Unload();
 
@@ -182,6 +205,29 @@ namespace Guardian.Sim.Editor
             }
             catch (Exception e) { Debug.LogException(e); code = 1; }
             EditorApplication.Exit(code);
+        }
+
+        /// <summary>
+        /// Builds the Linux player that start_uav_sim.sh --unity runs
+        /// (GuardianBootstrap sets it up from its command line):
+        ///   Unity -batchmode -quit -projectPath unity/GuardianSim -executeMethod Guardian.Sim.Editor.GuardianMenu.BuildPlayer
+        /// Output: unity/GuardianSim/Build/GuardianSim.x86_64
+        /// </summary>
+        public static void BuildPlayer()
+        {
+            var scenes = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(
+                System.Linq.Enumerable.Where(EditorBuildSettings.scenes, s => s.enabled), s => s.path));
+            var report = UnityEditor.BuildPipeline.BuildPlayer(new BuildPlayerOptions
+            {
+                scenes = scenes,
+                locationPathName = Path.Combine("Build", "GuardianSim.x86_64"),
+                target = BuildTarget.StandaloneLinux64,
+                options = BuildOptions.None,
+            });
+            var s = report.summary;
+            Debug.Log($"[Guardian] player build {s.result}: {s.outputPath}, {s.totalSize / (1 << 20)} MB, " +
+                      $"{s.totalTime.TotalMinutes:F1} min, {s.totalErrors} errors");
+            if (Application.isBatchMode) EditorApplication.Exit(s.result == UnityEditor.Build.Reporting.BuildResult.Succeeded ? 0 : 1);
         }
 
         /// <summary>

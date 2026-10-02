@@ -1,0 +1,45 @@
+# Game controller flight settings (joy_flight.py). Edit and relaunch - no rebuild
+# needed with colcon --symlink-install.
+#
+# Indices are SDL GameController numbers (game_controller_node), the same for
+# Xbox, PlayStation and most other pads:
+#   axes:    0 left X   1 left Y   2 right X   3 right Y   4 LT   5 RT   (up / left = +1)
+#   buttons: 0 A/Cross  1 B/Circle  2 X/Square  3 Y/Triangle  4 Back/Share  5 Guide/PS
+#            6 Start/Options  7 L-stick  8 R-stick  9 LB/L1  10 RB/R1  11-14 D-pad U/D/L/R
+# Unsure? ros2 run poc3_manual_scan joy_flight.py --ros-args -p show_inputs:=true
+joy_flight:
+  ros__parameters:
+    axis_yaw: 0
+    axis_throttle: 1
+    axis_roll: 2
+    axis_pitch: 3
+    button_takeoff: 6      # Start / Options
+    button_land: 1         # B / Circle
+    button_record: 3       # Y / Triangle
+    button_save: 2         # X / Square
+    button_slow: 9         # LB / L1 (hold)
+    button_fast: 10        # RB / R1 (hold)
+    deadzone: 0.08
+    expo: 0.4
+
+    max_speed_xy: 4.0          # m/s at full stick (x0.3 with LB, x2.5 with RB)
+    max_speed_z: 2.0
+    max_yaw_rate_deg: 60.0
+    slow_factor: 0.3
+    fast_factor: 2.5
+    max_accel_xy: 3.0          # m/s^2
+    max_accel_z: 2.0
+    takeoff_altitude: 8.0
+
+    fence_region: full         # scene manifest region: full (600 m site) or compound
+    fence_margin: 10.0
+    alt_min: 2.0               # sticks cannot descend below this; land with B
+    alt_max: 120.0             # EU open-category ceiling
+    joy_timeout_s: 0.5         # no input -> hold position
+    joy_lost_land_s: 15.0      # no input for this long -> land
+
+game_controller:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.0              # joy_flight applies its own deadzone with expo
+    autorepeat_rate: 20.0      # keeps /joy alive while sticks are still, so silence = controller lost

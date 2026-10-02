@@ -263,6 +263,20 @@ Measured on the RTX 4050 laptop (Phase 2):
 | Peak GPU memory / system RAM | 1.65 GB of 6 GB / 9.9 GB of 15 GB |
 | Gazebo real-time factor while Unity rendered | 0.998 |
 
+### The drone's camera in Unity (Phase 3)
+
+Unity follows the Gazebo drone and publishes what its stabilised gimbal camera
+sees as ordinary ROS 2 topics - `/unity_cam/image_raw`, `/unity_cam/camera_info`
+and TF `gz_world -> unity_cam_optical`, stamped with Gazebo sim time. Package
+`src/pocs/poc2_unity_camera`; protocol, run instructions and checks in
+[docs/UNITY_BRIDGE.md](docs/UNITY_BRIDGE.md).
+
+```bash
+./start_uav_sim.sh --world ~/UAV/data/bonn_poppelsdorf/world/bonn_poppelsdorf.sdf \
+                   --model gz_x500_threat_scanner --sensors --unity --mission --build
+# then in the Unity editor: Guardian -> Play Drone Camera (compound)
+```
+
 ## LiDAR and the 3D point cloud
 
 `models/x500_threat_scanner/` is the x500 plus:
@@ -290,6 +304,41 @@ ROS 2 topics (via `sensors.launch.py`):
 
 Cloud density is `horizontal x vertical x rate` = 512 x 16 x 10 = 82k rays/s.
 Raise `<samples>` in the model for a denser cloud once you are on the dGPU.
+
+### Fly it yourself with a game controller and scan (`poc3_manual_scan`)
+
+```bash
+./start_uav_sim.sh --world ~/UAV/data/bonn_poppelsdorf/world/bonn_poppelsdorf.sdf \
+                   --model gz_x500_threat_scanner --joystick [--unity] --build
+```
+
+Any SDL-supported pad (Xbox, PlayStation, Switch Pro, 8BitDo; USB or Bluetooth).
+Mode 2 sticks like an RC transmitter:
+
+| Input | Action |
+|---|---|
+| Start / Options / + | arm and take off (8 m) |
+| left stick | up/down = climb/descend, left/right = yaw |
+| right stick | forward/back/sideways (relative to where the drone faces) |
+| LB / L held, RB / R held | precise (x0.3) / fast (x2.5) |
+| Y / Triangle | start / stop a scan session |
+| X / Square | save the map now |
+| B / Circle | land |
+
+Let go of the sticks and the drone brakes and holds position. Safety: geofence
+from the site (10 m inside the 600 m area, 2-120 m altitude), controller lost
+-> hold, then land after 15 s; if QGroundControl or a PX4 failsafe changes the
+mode, the node stands down until Start is pressed again. Remap buttons in
+`src/pocs/poc3_manual_scan/config/controller.yaml`.
+
+Each scan session goes to `~/UAV/data/scans/<date_time>/`: `map.pcd` (open in
+CloudCompare), `trajectory.csv`, `raw/` (rosbag2 of LiDAR, IMU, poses - the input
+for LiDAR-inertial odometry next) and `session.json`. rviz2 shows the live scan
+and the growing map. The map is placed with Gazebo's ground-truth pose for now.
+
+Scripted check (no pad needed, `joy:=false`): `python3 src/pocs/poc3_manual_scan/test/smoke_flight.py`
+- takeoff, 13 m forward with <0.6 m sideways error, hands-off hold drift 0.06-0.15 m over 3 s,
+yaw, climb, 6.8 m/s fast mode, map saved, landed and disarmed: PASS.
 
 ## Verifying it actually works
 

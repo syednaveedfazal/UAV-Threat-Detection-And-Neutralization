@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>poc3_manual_scan</name>
+  <version>0.0.0</version>
+  <description>PoC 3: fly the PX4 drone with a game controller (offboard velocity, geofence, failsafes) and build a 3D LiDAR map of the site while flying.</description>
+  <maintainer email="syed@todo.todo">syed</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>px4_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>joy</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

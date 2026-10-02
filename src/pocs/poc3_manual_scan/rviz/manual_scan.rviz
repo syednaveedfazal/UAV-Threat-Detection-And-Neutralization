@@ -1,0 +1,111 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+    Help Height: 0
+    Tree Height: 300
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid (10 m)
+      Enabled: true
+      Cell Size: 10
+      Plane Cell Count: 60
+      Reference Frame: <Fixed Frame>
+      Color: 160; 160; 164
+      Alpha: 0.3
+      Plane: XY
+      Normal Cell Count: 0
+      Offset: {X: 0, Y: 0, Z: 0}
+      Line Style: {Line Width: 0.03, Value: Lines}
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Map (accumulated)
+      Enabled: true
+      Topic:
+        Value: /scan/map
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.1
+      Color Transformer: AxisColor
+      Axis: Z
+      Use Fixed Frame: true
+      Autocompute Value Bounds: false
+      Min Value: -2
+      Max Value: 25
+      Alpha: 1
+      Decay Time: 0
+      Position Transformer: XYZ
+      Queue Size: 2
+      Selectable: false
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Live LiDAR scan
+      Enabled: true
+      Topic:
+        Value: /lidar_3d/points
+        Depth: 2
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        History Policy: Keep Last
+      Style: Points
+      Size (Pixels): 3
+      Size (m): 0.1
+      Color Transformer: FlatColor
+      Color: 255; 255; 255
+      Alpha: 1
+      Decay Time: 0
+      Position Transformer: XYZ
+      Queue Size: 10
+      Selectable: false
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Marker Scale: 2
+      Update Interval: 0
+      Frame Timeout: 15
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 30; 32; 36
+    Fixed Frame: gz_world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/ThirdPersonFollower
+      Name: Follow drone
+      Target Frame: base_link
+      Distance: 45
+      Pitch: 0.55
+      Yaw: 3.6
+      Focal Point: {X: 0, Y: 0, Z: 0}
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Near Clip Distance: 0.01
+      Invert Z Axis: false
+      Value: ThirdPersonFollower (rviz)
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  Hide Left Dock: false
+  Hide Right Dock: true
