@@ -277,33 +277,45 @@ and TF `gz_world -> unity_cam_optical`, stamped with Gazebo sim time. Package
 # then in the Unity editor: Guardian -> Play Drone Camera (compound)
 ```
 
-## LiDAR and the 3D point cloud
+## The drone: x500 with a Livox Mid-360 and a gimbal camera
 
-`models/x500_threat_scanner/` is the x500 plus:
+`models/x500_threat_scanner/` is PX4's x500 (flight tuning unchanged) carrying
+the payload of a real mapping/security drone:
 
-- **16-beam 3D LiDAR** (`gpu_lidar`), 360 deg x 512 samples, 100 m range,
-  10 Hz, vertical band biased downward (-25 to +15 deg) for mapping the ground
-- **forward RGB camera**, 640x480 @ 15 Hz
+- **Livox Mid-360 LiDAR**, mounted upside down under the centre plate, as on
+  aerial mappers: its 360 x 59 deg field of view (-7..+52 deg) then looks down
+  at the ground. Gazebo has no Livox plugin, so a dense LiDAR grid renders each
+  frame and `livox_mid360_emulator.py` keeps a different random 20,000 rays
+  every frame - the real sensor's 200k points/s non-repetitive pattern - with
+  2 cm noise and its 40 m (dark) / 70 m (bright) range. Output uses the real
+  driver's message layout (livox_ros_driver2 `PointXYZRTLT`), so code written
+  against it runs unchanged on the real sensor. Built-in IMU included.
+- **Gimbal camera** under the front edge, 35 deg down, 82 deg FOV - the same
+  mount and lens as the Unity gimbal camera.
 
 LiDAR gives metric geometry regardless of lighting; the camera gives
 appearance. Fuse them: cluster the cloud for position/size, classify with the
 image. Neither alone answers "what is that and where".
 
-```bash
-./start_uav_sim.sh --model gz_x500_threat_scanner --sensors --mission
-```
+ROS 2 topics (via `sensors.launch.py`, started by `--sensors` / `--joystick`):
 
-ROS 2 topics (via `sensors.launch.py`):
+| Topic | Type | Rate |
+| --- | --- | --- |
+| `/livox/lidar` | `sensor_msgs/PointCloud2`, frame `livox_frame` | 10 Hz, ~187k points/s |
+| `/livox/imu` | `sensor_msgs/Imu` | ~190 Hz |
+| `/front_cam/image`, `/front_cam/camera_info` | `sensor_msgs/Image`, `CameraInfo` | 15 Hz |
 
-| Topic | Type |
-| --- | --- |
-| `/lidar_3d/points` | `sensor_msgs/PointCloud2` |
-| `/lidar_3d` | `sensor_msgs/LaserScan` |
-| `/front_cam/image` | `sensor_msgs/Image` |
-| `/front_cam/camera_info` | `sensor_msgs/CameraInfo` |
+Measured: Gazebo renders the grid at 10.0 Hz; the emulator publishes 10.0 Hz /
+187k points/s (the rest are rays that hit nothing within 70 m). A map flown with
+the Mid-360 lies within 9 cm (median) of one flown with the old 16-beam sensor -
+the upside-down mount is handled correctly end to end.
+Known gap: Gazebo captures a frame at one instant, so the 100 ms motion smear
+of a real Mid-360 (and its de-skewing) is not simulated.
 
-Cloud density is `horizontal x vertical x rate` = 512 x 16 x 10 = 82k rays/s.
-Raise `<samples>` in the model for a denser cloud once you are on the dGPU.
+In Unity the drone is the same model: `scripts/build_drone_model.py` exports the
+Gazebo visuals (x500 frame, motors, props, Mid-360, gimbal) to `drone_x500.glb`;
+the propellers spin while PX4 reports armed and the gimbal head turns with the
+stabilised camera.
 
 ### Fly it yourself with a game controller and scan (`poc3_manual_scan`)
 
@@ -335,6 +347,13 @@ Each scan session goes to `~/UAV/data/scans/<date_time>/`: `map.pcd` (open in
 CloudCompare), `trajectory.csv`, `raw/` (rosbag2 of LiDAR, IMU, poses - the input
 for LiDAR-inertial odometry next) and `session.json`. rviz2 shows the live scan
 and the growing map. The map is placed with Gazebo's ground-truth pose for now.
+
+![LiDAR map from a controller flight over Campus Poppelsdorf](docs/images/scan_map.png)
+
+*One controller flight (234 m) over the real Bonn site: 1.04 million points at
+15 cm. Building walls, tree crowns, the fence and the parking rows are all
+sharp because every scan is placed with the exact pose. Render any session with
+`python3 scripts/render_scan.py ~/UAV/data/scans/<date_time>`.*
 
 Scripted check (no pad needed, `joy:=false`): `python3 src/pocs/poc3_manual_scan/test/smoke_flight.py`
 - takeoff, 13 m forward with <0.6 m sideways error, hands-off hold drift 0.06-0.15 m over 3 s,
