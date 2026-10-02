@@ -1,5 +1,5 @@
 # UAV-Threat-Detection-And-Neutralization
-![alt text](image-1.png)
+![alt text](image-copy.png)
 
 
 An advanced UAV which can auto detect the intruder with computer vision and lidar sensors to map  around the near by restricted area and give up the alaram for Threat near by
